@@ -7,10 +7,10 @@ import sys
 import socketio
 
 from threading import Thread
-from queue import Queue
+from queue import Queue, Full, Empty
 
-
-cap = cv2.VideoCapture(sys.argv[1])
+source = int(sys.argv[1]) if sys.argv[1].isdigit() else sys.argv[1]
+cap = cv2.VideoCapture(source)
 # cap = cv2.VideoCapture(0)
 
 fd = service.UltraLightFaceDetecion("weights/RFB-320.tflite",
@@ -29,6 +29,16 @@ upstream_queue = Queue(maxsize=QUEUE_BUFFER_SIZE)
 
 # ======================================================
 
+def put_nowait_drop_oldest(q, item):
+    try:
+        q.put_nowait(item)
+    except Full:
+        try:
+            q.get_nowait()
+        except Empty:
+            pass
+        q.put_nowait(item)
+
 def face_detection():
     while True:
         ret, frame = cap.read()
@@ -38,20 +48,24 @@ def face_detection():
             break
 
         face_boxes, _ = fd.inference(frame)
-        box_queue.put((frame, face_boxes))
+        put_nowait_drop_oldest(box_queue, (frame, face_boxes))
 
 
 def face_alignment():
     while True:
         frame, boxes = box_queue.get()
         landmarks = fa.get_landmarks(frame, boxes)
-        landmark_queue.put((frame, landmarks))
+        put_nowait_drop_oldest(landmark_queue, (frame, landmarks))
 
 
 def iris_localization(YAW_THD=45):
     sio = socketio.Client()
 
     sio.connect("http://127.0.0.1:6789", namespaces='/model')
+    
+    EYE_SMOOTH = 0.4
+    left_eye_smooth = 1.0
+    right_eye_smooth = 1.0
 
     while True:
         frame, preds = landmark_queue.get()
@@ -85,20 +99,24 @@ def iris_localization(YAW_THD=45):
                 landmarks[33, 1] - landmarks[40, 1]) / eye_lengths[0]
             right_eye_status = (
                 landmarks[87, 1] - landmarks[94, 1]) / eye_lengths[1]
+                
+            left_eye_smooth = left_eye_smooth * (1 - EYE_SMOOTH) + left_eye_status * EYE_SMOOTH
+            right_eye_smooth = right_eye_smooth * (1 - EYE_SMOOTH) + right_eye_status * EYE_SMOOTH
+
             result_string = {'euler': (pitch, -yaw, -roll),
                              'eye': (theta.mean(), pha.mean()),
                              'mouth': mouth_open_percent,
-                             'blink': (left_eye_status, right_eye_status)}
+                             'blink': (left_eye_smooth, right_eye_smooth)}
             sio.emit('result_data', result_string, namespace='/model')
-            upstream_queue.put((frame, landmarks, euler_angle))
-            break
+            put_nowait_drop_oldest(upstream_queue, (frame, landmarks, euler_angle))
+            break # Explicitly process only the first detected face
 
 
 def draw(color=(125, 255, 0), thickness=2):
     while True:
         frame, landmarks, euler_angle = upstream_queue.get()
 
-        for p in np.round(landmarks).astype(np.int):
+        for p in np.round(landmarks).astype(int):
             cv2.circle(frame, tuple(p), 1, color, thickness, cv2.LINE_AA)
 
         # face_center = np.mean(landmarks, axis=0)
