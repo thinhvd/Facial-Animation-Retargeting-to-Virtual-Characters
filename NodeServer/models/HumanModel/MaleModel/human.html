@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8">
+	<style type="text/css">
+		body {
+			margin: 0;
+			background-color: #000;
+			color: #fff;
+			font-family: Monospace;
+			font-size: 13px;
+			line-height: 24px;
+			overscroll-behavior: none;
+		}
+
+		canvas {
+			display: block;
+		}
+	</style>
+</head>
+
+<body>
+	<script src="https://cdn.jsdelivr.net/npm/socket.io-client@3.1.0/dist/socket.io.min.js"></script>
+
+	<script src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/js/libs/ammo.wasm.js"></script>
+
+	<script type="module">
+		import * as THREE from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/build/three.module.js';
+
+		import Stats from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/jsm/libs/stats.module.js';
+
+		import { OutlineEffect } from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/jsm/effects/OutlineEffect.js';
+		
+		// import { MMDLoader } from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/jsm/loaders/MMDLoader.js';
+		
+		import { FBXLoader } from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/jsm/loaders/FBXLoader.js';
+		// import { FBXLoader } from 'https://cdn.jsdelivr.net/npm/three@0.118.1/examples/jsm/loaders/FBXLoader.js';
+
+		import { MMDAnimationHelper } from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/jsm/animation/MMDAnimationHelper.js';
+
+		import { OBJLoader } from 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r123/examples/jsm/loaders/OBJLoader.js';
+
+		var container, stats, helper;
+		var mesh, camera, scene, renderer, effect;
+		var head, left_eye, right_eye;
+
+		var angle_const = 3.1415926 / 180;
+		
+		var socket = io("http://127.0.0.1:6789/human");
+		var websocketClose = () => socket.close();
+
+		socket.on('result_download', (result) => {
+			requestAnimationFrame(() => animate(result));
+		});
+		
+		// var clock = new THREE.Clock(); 
+		
+		Ammo().then(function (AmmoLib) {
+
+			setTimeout(function () {
+				requestAnimationFrame(() => animate({ 'euler': [0, 0, 0], 'eye': [0, 0] }));
+			}, 2000);
+
+			init();
+		});
+
+		function init() {
+            container = document.createElement('div');
+			document.body.appendChild(container);
+
+			camera = new THREE.PerspectiveCamera(20, window.innerWidth / window.innerHeight, 1, 100);
+			camera.position.set(0, 14, 25);
+			//camera.position.set(0, -1, 20) // zoom out
+
+			// scene
+
+			scene = new THREE.Scene();
+			scene.background = new THREE.Color(0xffffff);
+
+			var ambient = new THREE.AmbientLight(0x666666);
+			scene.add(ambient);
+
+			var directionalLight = new THREE.DirectionalLight(0x887766);
+			directionalLight.position.set(- 1, 1, 1).normalize();
+			scene.add(directionalLight);
+
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+			renderer.setPixelRatio(window.devicePixelRatio);
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			container.appendChild(renderer.domElement);
+
+			effect = new OutlineEffect(renderer);
+
+			// STATS
+
+			stats = new Stats();
+			container.appendChild(stats.dom);
+
+            // controls = new THREE.OrbitControls(camera,  renderer.domElement);
+            // controls.addEventListener('change', renderer);
+
+            const fbxLoader = new FBXLoader();
+
+            fbxLoader.load('models/HumanModel/MaleModel/untitled.fbx', (object) => {
+				mesh = object
+
+				console.log(mesh.children[1])
+
+				console.log(mesh)
+				scene.add(mesh);
+
+				var bones = mesh.children[1].skeleton.bones;
+				head = bones.filter(bone => bone.name == "Head")[0]
+				console.log(head)
+            });
+        }
+        function animate(result){
+            stats.begin();
+			render(result);
+			stats.end();
+        }
+
+		function render(result){
+			var euler = result.euler;
+			var eye_euler = result.eye;
+			var mouth = result.mouth;
+			var blink = result.blink;
+
+			if (head) {
+				head.rotation.x = Math.round(euler[0]) * angle_const;
+				head.rotation.y = Math.round(euler[1]) * angle_const;
+				head.rotation.z = Math.round(euler[2]) * angle_const;
+			}
+		}
+
+	</script>
+
+</body>
+
+</html>
