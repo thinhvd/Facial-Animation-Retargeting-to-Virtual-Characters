@@ -1,5 +1,18 @@
-# OpenVtuber
+# Facial Animation Retargeting to Virtual Characters
+
+Two pipelines live in this repo:
+
+* **`retarget/` — canonical pipeline (new, in development).** Any model (PMX today; glTF/VRM pass-through)
+  is converted to glTF + a per-model adapter, and driven from MediaPipe blendshapes through a shared
+  ARKit-52 expression space. See [retarget/README.md](retarget/README.md).
+* **Legacy pipeline (CITA 2025 baseline, "B0")** — the original OpenVtuber-based code below:
+  TFLite face tracking → Node relay → three.js MMDLoader. Kept unchanged for comparison.
+
+---
+
+# OpenVtuber (legacy B0 pipeline)
 Real-time facial animation transfer system using Python, TensorFlow Lite, and Three.js.
+Derived from [1996scarlet/OpenVtuber](https://github.com/1996scarlet/OpenVtuber) (GPL-3.0).
 
 ## Architecture
 ```text

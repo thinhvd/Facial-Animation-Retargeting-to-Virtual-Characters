@@ -6,3 +6,9 @@ docs/
 *.mp4
 
 __pycache__
+# canonical pipeline: generated models, downloaded weights, tool caches
+web/models/*.glb
+web/models/*.vrm
+web/models/*.adapter.json
+weights/face_landmarker.task
+package-lock.json

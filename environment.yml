@@ -1,0 +1,22 @@
+# Environment for the canonical pipeline (retarget/).  The legacy B0 pipeline
+# (vtuber_link_start.py + NodeServer) keeps its own requirements.txt.
+#
+#   conda env create -f environment.yml
+#   conda activate fr
+name: fr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - nodejs            # only for tools/validate_glb.js (npm i -g gltf-validator)
+  - pip
+  - pip:
+      - mediapipe>=0.10.18
+      - opencv-python>=4.8
+      - numpy
+      - scipy
+      - trimesh
+      - pillow
+      - python-socketio[client,asyncio_client]>=5.10
+      - aiohttp>=3.9
+      - playwright       # optional: tools/screenshot_viewer.py

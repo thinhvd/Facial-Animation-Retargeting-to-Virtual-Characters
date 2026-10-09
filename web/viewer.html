@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retarget viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #202020; color: #eee; font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #panel { position: absolute; top: 10px; right: 10px; width: 300px; max-height: calc(100% - 20px); overflow: auto;
+           background: rgba(0,0,0,.65); border-radius: 8px; padding: 10px 12px; box-sizing: border-box; }
+  #panel h3 { margin: 8px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: #9cf; }
+  #panel label { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #panel label span { flex: 0 0 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #panel input[type=range] { flex: 1; min-width: 0; }
+  #panel select, #panel button { width: 100%; margin: 2px 0; }
+  #status { font-family: ui-monospace, monospace; font-size: 11px; white-space: pre-wrap; color: #bbb; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h3>Model</h3>
+  <select id="modelSelect"></select>
+  <div class="row"><button id="loadBtn">Load</button><button id="bgBtn">Background</button><button id="resetBtn">Reset pose</button></div>
+  <label><span>Smoothing</span><input id="smooth" type="range" min="0" max="0.95" step="0.05" value="0.5"><b id="smoothVal">0.50</b></label>
+  <label><span>Mirror in viewer</span><input id="mirror" type="checkbox"></label>
+  <label><span>Drive from sliders</span><input id="manual" type="checkbox"></label>
+  <h3>Status</h3>
+  <div id="status">connecting…</div>
+  <h3>Head / gaze</h3>
+  <div id="poseSliders"></div>
+  <h3>Canonical inputs (ARKit 52)</h3>
+  <div id="bsSliders"></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.8.1/dist/socket.io.min.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+    "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.5.5/lib/three-vrm.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import Stats from 'three/addons/libs/stats.module.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const ARKIT_52 = ['eyeBlinkLeft','eyeLookDownLeft','eyeLookInLeft','eyeLookOutLeft','eyeLookUpLeft','eyeSquintLeft','eyeWideLeft',
+  'eyeBlinkRight','eyeLookDownRight','eyeLookInRight','eyeLookOutRight','eyeLookUpRight','eyeSquintRight','eyeWideRight',
+  'jawForward','jawLeft','jawRight','jawOpen','mouthClose','mouthFunnel','mouthPucker','mouthLeft','mouthRight',
+  'mouthSmileLeft','mouthSmileRight','mouthFrownLeft','mouthFrownRight','mouthDimpleLeft','mouthDimpleRight',
+  'mouthStretchLeft','mouthStretchRight','mouthRollLower','mouthRollUpper','mouthShrugLower','mouthShrugUpper',
+  'mouthPressLeft','mouthPressRight','mouthLowerDownLeft','mouthLowerDownRight','mouthUpperUpLeft','mouthUpperUpRight',
+  'browDownLeft','browDownRight','browInnerUp','browOuterUpLeft','browOuterUpRight','cheekPuff','cheekSquintLeft',
+  'cheekSquintRight','noseSneerLeft','noseSneerRight','tongueOut'];
+const BONE_ALIASES = {
+  head: ['頭','Head','head','mixamorig:Head','J_Bip_C_Head','Bip01 Head','CC_Base_Head'],
+  leftEye: ['左目','LeftEye','Eye_L','eye_L','eye.L','mixamorig:LeftEye','J_Adj_L_FaceEye'],
+  rightEye: ['右目','RightEye','Eye_R','eye_R','eye.R','mixamorig:RightEye','J_Adj_R_FaceEye'],
+};
+const DEG = Math.PI / 180;
+
+// ---------------------------------------------------------------- scene
+let renderer, scene, camera, controls, stats, clock;
+let model = null;            // { root, vrm, morphTargets: Map<name, [{mesh, index}]>, bones: {head, leftEye, leftEye}, adapter, restQuat }
+let bgIndex = 0;
+const BACKGROUNDS = [0x202020, 0xffffff, 0x00ff00];
+const smoothed = { head: [0, 0, 0], gaze: [0, 0], bs: {} };
+let lastFrame = null, framesReceived = 0, lastFpsTime = performance.now(), recvFps = 0;
+
+function init() {
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(BACKGROUNDS[0]);
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+  const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+  dir.position.set(0.5, 1, 1.5);
+  scene.add(dir);
+
+  camera = new THREE.PerspectiveCamera(25, window.innerWidth / window.innerHeight, 0.01, 50);
+  camera.position.set(0, 1.5, 1.2);
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 1.5, 0);
+  controls.update();
+
+  stats = new Stats();
+  stats.dom.style.left = '10px';
+  document.body.appendChild(stats.dom);
+  clock = new THREE.Clock();
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  renderer.setAnimationLoop(tick);
+}
+
+// ---------------------------------------------------------------- loading
+const loader = new GLTFLoader();
+loader.register(parser => new VRMLoaderPlugin(parser));
+
+async function loadModel(url, adapterUrl) {
+  if (model) {
+    scene.remove(model.root);
+    if (model.vrm) VRMUtils.deepDispose(model.vrm.scene);
+  }
+  model = null;
+  setStatus(`loading ${url} …`);
+  const gltf = await loader.loadAsync(url);
+  const vrm = gltf.userData.vrm || null;
+  const root = vrm ? vrm.scene : gltf.scene;
+  if (vrm) {
+    VRMUtils.removeUnnecessaryVertices(root);
+    VRMUtils.combineSkeletons(root);
+  }
+  scene.add(root);
+
+  // morph targets: name -> [{mesh, index}]
+  const morphTargets = new Map();
+  root.traverse(o => {
+    if (o.isMesh && o.morphTargetDictionary) {
+      for (const [name, index] of Object.entries(o.morphTargetDictionary)) {
+        if (!morphTargets.has(name)) morphTargets.set(name, []);
+        morphTargets.get(name).push({ mesh: o, index });
+      }
+    }
+  });
+
+  let adapter = null;
+  if (adapterUrl) {
+    try { adapter = await (await fetch(adapterUrl)).json(); } catch (e) { console.warn('no adapter', e); }
+  }
+  if (!adapter) adapter = fallbackAdapter(morphTargets, vrm);
+
+  const bones = {};
+  for (const sem of ['head', 'leftEye', 'rightEye']) {
+    let node = null;
+    if (vrm) node = vrm.humanoid.getNormalizedBoneNode(sem);
+    if (!node) {
+      const names = [adapter.bones?.[sem], ...(BONE_ALIASES[sem] || [])].filter(Boolean);
+      for (const n of names) { node = root.getObjectByName(n); if (node) break; }
+    }
+    bones[sem] = node || null;
+  }
+  const restQuat = {};
+  for (const [sem, node] of Object.entries(bones)) if (node) restQuat[sem] = node.quaternion.clone();
+
+  frameCameraOn(root, bones.head);
+  model = { root, vrm, morphTargets, bones, adapter, restQuat, rootRestQuat: root.quaternion.clone() };
+  resetSliders();
+  const cov = adapter.coverageSummary ? `${adapter.coverageSummary.covered}/${adapter.coverageSummary.total}` : 'n/a';
+  setStatus(`loaded ${url}\nvrm: ${vrm ? vrm.meta?.metaVersion || 'yes' : 'no'}  morph targets: ${morphTargets.size}\n` +
+            `bones: head=${bones.head?.name || '-'} L=${bones.leftEye?.name || '-'} R=${bones.rightEye?.name || '-'}\n` +
+            `adapter entries: ${adapter.entries.length}  coverage: ${cov}`);
+}
+
+function fallbackAdapter(morphTargets, vrm) {
+  // ARKit-named morph targets drive themselves; nothing else is known client-side.
+  const entries = [];
+  for (const name of morphTargets.keys()) {
+    const base = name.replace('_L', 'Left').replace('_R', 'Right');
+    if (ARKIT_52.includes(base)) entries.push({ kind: 'morph', target: name, inputs: [base], combine: 'max', gain: 1 });
+  }
+  if (vrm && vrm.expressionManager) {
+    const presets = { aa: ['jawOpen'], ih: ['mouthStretchLeft', 'mouthStretchRight'], ou: ['mouthPucker'], oh: ['mouthFunnel'],
+      blink: ['eyeBlinkLeft', 'eyeBlinkRight'], happy: ['mouthSmileLeft', 'mouthSmileRight'], angry: ['browDownLeft', 'browDownRight'] };
+    for (const [p, inputs] of Object.entries(presets)) {
+      if (vrm.expressionManager.getExpression(p)) entries.push({ kind: 'vrmExpression', target: p, inputs, combine: p === 'blink' ? 'min' : 'mean', gain: 1 });
+    }
+    entries.push({ kind: 'vrmExpression', target: 'blinkLeft', inputs: ['eyeBlinkLeft', 'eyeBlinkRight'], combine: 'diff', gain: 1 });
+    entries.push({ kind: 'vrmExpression', target: 'blinkRight', inputs: ['eyeBlinkRight', 'eyeBlinkLeft'], combine: 'diff', gain: 1 });
+  }
+  return { version: 1, bones: {}, entries, headMode: 'auto', gazeMode: 'auto' };
+}
+
+function frameCameraOn(root, headBone) {
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  let target, headHeight;
+  if (headBone) {
+    target = new THREE.Vector3();
+    headBone.getWorldPosition(target);
+    headHeight = Math.max(0.12, (box.max.y - target.y) * 1.4);   // head bone sits near the chin/neck
+    target.y += headHeight * 0.3;
+  } else {
+    target = box.getCenter(new THREE.Vector3());
+    headHeight = size.y;
+  }
+  // fit the head into ~55% of the viewport height
+  const dist = headHeight / (2 * Math.tan(camera.fov * DEG / 2)) / 0.55;
+  camera.position.set(target.x, target.y, target.z + dist);
+  controls.target.copy(target);
+  controls.update();
+}
+
+// ---------------------------------------------------------------- applying a frame
+function combine(op, values) {
+  if (!values.length) return 0;
+  switch (op) {
+    case 'min': return Math.min(...values);
+    case 'mean': return values.reduce((a, b) => a + b, 0) / values.length;
+    case 'diff': return Math.max(0, values[0] - Math.max(0, ...values.slice(1)));
+    default: return Math.max(...values);
+  }
+}
+
+function applyFrame(frame) {
+  if (!model) return;
+  const mirror = document.getElementById('mirror').checked;
+  const bs = {};
+  for (const n of ARKIT_52) {
+    const src = mirror ? mirrorName(n) : n;
+    bs[n] = frame.bs?.[src] ?? 0;
+  }
+  const head = frame.head || [0, 0, 0];
+  const gaze = frame.gaze || [0, 0];
+  const h = mirror ? [head[0], -head[1], -head[2]] : head;
+  const g = mirror ? [gaze[0], -gaze[1]] : gaze;
+
+  const a = 1 - parseFloat(document.getElementById('smooth').value);
+  for (let i = 0; i < 3; i++) smoothed.head[i] += (h[i] - smoothed.head[i]) * a;
+  for (let i = 0; i < 2; i++) smoothed.gaze[i] += (g[i] - smoothed.gaze[i]) * a;
+  for (const n of ARKIT_52) smoothed.bs[n] = (smoothed.bs[n] ?? 0) + (bs[n] - (smoothed.bs[n] ?? 0)) * a;
+
+  // morphs / expressions
+  const influence = new Map();
+  for (const e of model.adapter.entries) {
+    const v = Math.min(1, Math.max(0, combine(e.combine, e.inputs.map(i => smoothed.bs[i] ?? 0)) * (e.gain ?? 1)));
+    const key = `${e.kind}:${e.target}`;
+    influence.set(key, Math.max(influence.get(key) ?? 0, v));
+  }
+  for (const [key, v] of influence) {
+    const [kind, target] = [key.slice(0, key.indexOf(':')), key.slice(key.indexOf(':') + 1)];
+    if (kind === 'vrmExpression' && model.vrm?.expressionManager) {
+      model.vrm.expressionManager.setValue(target, v);
+    } else {
+      for (const { mesh, index } of model.morphTargets.get(target) || []) mesh.morphTargetInfluences[index] = v;
+    }
+  }
+
+  // head
+  const e = new THREE.Euler(smoothed.head[0] * DEG, smoothed.head[1] * DEG, smoothed.head[2] * DEG, 'XYZ');
+  const q = new THREE.Quaternion().setFromEuler(e);
+  if (model.bones.head) {
+    model.bones.head.quaternion.copy(model.restQuat.head).multiply(q);
+  } else {
+    model.root.quaternion.copy(model.rootRestQuat).multiply(q);
+  }
+  // gaze
+  const ge = new THREE.Euler(smoothed.gaze[0] * DEG, smoothed.gaze[1] * DEG, 0, 'XYZ');
+  const gq = new THREE.Quaternion().setFromEuler(ge);
+  for (const sem of ['leftEye', 'rightEye']) {
+    if (model.bones[sem]) model.bones[sem].quaternion.copy(model.restQuat[sem]).multiply(gq);
+  }
+  if (model.vrm) model.vrm.update(clock.getDelta());
+}
+
+function mirrorName(n) {
+  if (n.endsWith('Left')) return n.slice(0, -4) + 'Right';
+  if (n.endsWith('Right')) return n.slice(0, -5) + 'Left';
+  return n;
+}
+
+function tick() {
+  stats.begin();
+  const manual = document.getElementById('manual').checked;
+  const frame = manual ? sliderFrame() : lastFrame;
+  if (frame) applyFrame(frame);
+  else if (model?.vrm) model.vrm.update(clock.getDelta());
+  renderer.render(scene, camera);
+  stats.end();
+}
+
+// ---------------------------------------------------------------- socket
+const socket = io('/retarget');
+socket.on('connect', () => setStatus('socket connected, waiting for frames…'));
+socket.on('disconnect', () => setStatus('socket disconnected'));
+socket.on('frame', frame => {
+  lastFrame = frame;
+  framesReceived++;
+  const now = performance.now();
+  if (now - lastFpsTime > 1000) {
+    recvFps = framesReceived * 1000 / (now - lastFpsTime);
+    framesReceived = 0; lastFpsTime = now;
+    document.getElementById('status').dataset.rx = recvFps.toFixed(1);
+    refreshStatusLine();
+  }
+});
+
+let statusBase = '';
+function setStatus(s) { statusBase = s; refreshStatusLine(); }
+function refreshStatusLine() {
+  const el = document.getElementById('status');
+  el.textContent = statusBase + (el.dataset.rx ? `\nframes/s received: ${el.dataset.rx}` : '');
+}
+
+// ---------------------------------------------------------------- UI
+function sliderFrame() {
+  const bs = {};
+  for (const n of ARKIT_52) bs[n] = parseFloat(document.getElementById('bs_' + n).value);
+  const v = id => parseFloat(document.getElementById(id).value);
+  return { bs, head: [v('p_rx'), v('p_ry'), v('p_rz')], gaze: [v('p_gp'), v('p_gy')], src: 'sliders' };
+}
+function slider(parent, id, label, min, max, step, value) {
+  const l = document.createElement('label');
+  l.innerHTML = `<span title="${label}">${label}</span>`;
+  const inp = document.createElement('input');
+  Object.assign(inp, { type: 'range', id, min, max, step, value });
+  l.appendChild(inp);
+  parent.appendChild(l);
+}
+function buildSliders() {
+  const pose = document.getElementById('poseSliders');
+  slider(pose, 'p_rx', 'head pitch (rx)', -40, 40, 1, 0);
+  slider(pose, 'p_ry', 'head yaw (ry)', -60, 60, 1, 0);
+  slider(pose, 'p_rz', 'head roll (rz)', -40, 40, 1, 0);
+  slider(pose, 'p_gp', 'gaze pitch', -30, 30, 1, 0);
+  slider(pose, 'p_gy', 'gaze yaw', -30, 30, 1, 0);
+  const bsp = document.getElementById('bsSliders');
+  for (const n of ARKIT_52) slider(bsp, 'bs_' + n, n, 0, 1, 0.01, 0);
+}
+function resetSliders() {
+  for (const n of ARKIT_52) document.getElementById('bs_' + n).value = 0;
+  for (const id of ['p_rx', 'p_ry', 'p_rz', 'p_gp', 'p_gy']) document.getElementById(id).value = 0;
+}
+async function populateModels() {
+  const sel = document.getElementById('modelSelect');
+  const models = await (await fetch('api/models')).json();
+  sel.innerHTML = '';
+  for (const m of models) {
+    const o = document.createElement('option');
+    o.value = m.url; o.dataset.adapter = m.adapter || '';
+    o.textContent = `${m.name} (${m.size_mb} MB${m.adapter ? ', adapter' : ''})`;
+    sel.appendChild(o);
+  }
+  return models;
+}
+document.getElementById('loadBtn').addEventListener('click', () => {
+  const sel = document.getElementById('modelSelect');
+  const opt = sel.selectedOptions[0];
+  if (opt) loadModel(opt.value, opt.dataset.adapter || null).catch(e => setStatus('load failed: ' + e.message));
+});
+document.getElementById('bgBtn').addEventListener('click', () => {
+  bgIndex = (bgIndex + 1) % BACKGROUNDS.length;
+  scene.background = new THREE.Color(BACKGROUNDS[bgIndex]);
+});
+document.getElementById('resetBtn').addEventListener('click', () => {
+  resetSliders();
+  lastFrame = null;
+  if (model) applyFrame({ bs: {}, head: [0, 0, 0], gaze: [0, 0] });
+});
+document.getElementById('smooth').addEventListener('input', e => document.getElementById('smoothVal').textContent = parseFloat(e.target.value).toFixed(2));
+
+init();
+buildSliders();
+{
+  const params = new URLSearchParams(location.search);
+  if (params.get('panel') === '0') document.getElementById('panel').style.display = 'none';
+  if (params.get('stats') === '0') stats.dom.style.display = 'none';
+}
+populateModels().then(models => {
+  const params = new URLSearchParams(location.search);
+  const want = params.get('model');
+  const pick = models.find(m => m.name === want) || models[0];
+  if (pick) {
+    document.getElementById('modelSelect').value = pick.url;
+    loadModel(pick.url, pick.adapter).catch(e => setStatus('load failed: ' + e.message));
+  } else setStatus('no models in web/models/ — run: python -m retarget.convert <file.pmx>');
+});
+</script>
+</body>
+</html>
