@@ -13,6 +13,7 @@ import asyncio
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import socketio
@@ -98,6 +99,8 @@ async def api_landmarks_post(request):
     import numpy as np
     from .rig.landmarks import expand_clicks, landmarks_from_pixels
     name = _model_or_404(request)
+    if _running(name):
+        raise web.HTTPConflict(text=f'{name} is being generated; save the points when it has finished')
     body = await request.json()
     cam = json.loads((WEB_ROOT / 'models' / f'{name}.camera.json').read_text())
     px = np.full((478, 2), np.nan)
@@ -108,6 +111,7 @@ async def api_landmarks_post(request):
     expand_clicks(px)
     loop = asyncio.get_running_loop()
     r = await loop.run_in_executor(None, lambda: landmarks_from_pixels(name, px, cam, WEB_ROOT / 'models'))
+    (WEB_ROOT / 'models' / f'{name}.landmarks_failed.json').unlink(missing_ok=True)
     print(f'[server] {name}: {r["count"]} hand-picked landmarks saved, missed {r["missed"]}')
     return web.json_response({'count': r['count'], 'missed': r['missed']})
 
@@ -115,6 +119,8 @@ async def api_landmarks_post(request):
 async def api_landmarks_render(request):
     """Front render + camera for a model that has none yet (headless Chromium, ~10 s)."""
     name = _model_or_404(request)
+    if JOB['status'] == 'running':
+        raise web.HTTPConflict(text=f'busy generating {JOB["model"]}; render when it has finished')
     proc = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'retarget.rig.landmarks', name, '--render-only',
         cwd=str(WEB_ROOT.parent), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -124,11 +130,116 @@ async def api_landmarks_render(request):
     return web.json_response({'png': f'models/{name}.front.png'})
 
 
+# ---- blendshape generation as a background job (one at a time: generate and the headless
+# browser used for automatic landmarks each take 1-2 GB)
+JOB: dict = {'model': None, 'status': 'idle', 'log': [], 'started': 0.0, 'seconds': 0.0}
+_NOISE = re.compile(r'^(W0000|I0000|WARNING: All log messages|INFO: Created TensorFlow|E0000)')
+
+
+async def _run_rig(name: str) -> None:
+    JOB.update(model=name, status='running', log=[], started=time.time(), seconds=0.0)
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, '-u', '-m', 'retarget.importer', '--existing', name,
+        cwd=str(WEB_ROOT.parent), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    async for raw in proc.stdout:
+        line = raw.decode(errors='replace').rstrip()
+        if line and not _NOISE.match(line):
+            JOB['log'] = (JOB['log'] + [line])[-200:]
+    rc = await proc.wait()
+    JOB['seconds'] = round(time.time() - JOB['started'], 1)
+    JOB['status'] = {0: 'done', 3: 'needs_landmarks'}.get(rc, 'failed')
+    print(f'[server] rig {name}: {JOB["status"]} in {JOB["seconds"]} s')
+
+
+def _running(name: str | None = None) -> bool:
+    return JOB['status'] == 'running' and (name is None or JOB['model'] == name)
+
+
+def _mtime(path: Path) -> float:
+    return path.stat().st_mtime if path.is_file() else 0.0
+
+
+def rig_state(name: str) -> dict:
+    """Where a model stands in import -> (landmarks) -> generate, and the one next step.
+
+    state:  running          a job for this model is running
+            complete         its own morphs and bones cover every input but tongueOut: nothing to generate
+            up_to_date       <name>.rigged.glb is newer than the model and its landmarks
+            ready            landmarks exist and the result is missing or older: Generate
+            needs_landmarks  MediaPipe found no face and nobody has placed points: Pick landmarks
+            ready_auto       never tried: Generate (MediaPipe first)
+    Both pages derive their buttons from this; POST /api/rig refuses what the state does not allow.
+    """
+    m = WEB_ROOT / 'models'
+    glb, rigged, lm = m / f'{name}.glb', m / f'{name}.rigged.glb', m / f'{name}.landmarks.json'
+    read = lambda p: json.loads(p.read_text()) if p.is_file() else None
+    cov = (read(m / f'{name}.adapter.json') or {}).get('coverageSummary')
+    rcov = (read(m / f'{name}.rigged.adapter.json') or {}).get('coverageSummary')
+    lmd = read(lm)
+    landmarks = None
+    if lmd:
+        from .rig.landmarks import CLICK_POINTS
+        manual = lmd.get('source') == 'manual'
+        landmarks = {'source': lmd.get('source', 'mediapipe'),
+                     'count': sum(lmd['valid'][i] for _, i, _ in CLICK_POINTS) if manual else lmd.get('count')}
+    up_to_date = rigged.is_file() and _mtime(rigged) >= max(_mtime(glb), _mtime(lm))
+    if _running(name):
+        state = 'running'
+    elif up_to_date:
+        state = 'up_to_date'
+    elif cov and cov['covered'] >= cov['total'] - 1 and not rigged.is_file():
+        state = 'complete'
+    elif landmarks:
+        state = 'ready'
+    elif (m / f'{name}.landmarks_failed.json').is_file():
+        state = 'needs_landmarks'
+    else:
+        state = 'ready_auto'
+    mine = JOB['model'] == name
+    return {
+        'model': name, 'state': state,
+        'busy_with': JOB['model'] if _running() and not mine else None,
+        'coverage': cov and [cov['covered'], cov['total']],
+        'rigged': f'{name}.rigged' if rigged.is_file() else None,
+        'rigged_coverage': rcov and [rcov['covered'], rcov['total']],
+        'rig_report': read(m / f'{name}.rig.json'),
+        'landmarks': landmarks, 'render': (m / f'{name}.front.png').is_file(),
+        # the last job for this model (kept after it ends, until the server restarts)
+        'job': {'status': JOB['status'], 'log': JOB['log'][-12:], 'seconds': JOB['seconds'],
+                'elapsed': round(time.time() - JOB['started'], 1) if _running(name) else 0.0} if mine else None,
+    }
+
+
+async def api_rig_get(request):
+    return web.json_response(rig_state(_model_or_404(request)))
+
+
+async def api_rig_post(request):
+    """Start generation, but only when the state allows it (?force=1 regenerates anyway)."""
+    name = _model_or_404(request)
+    if name.endswith('.rigged'):
+        raise web.HTTPBadRequest(text='pick the source model, not its .rigged result')
+    if _running():
+        raise web.HTTPConflict(text=f'busy: generating {JOB["model"]}')
+    st = rig_state(name)
+    if 'force' not in request.query:
+        refuse = {'up_to_date': 'already generated from these points; change the landmarks first',
+                  'complete': 'the model covers every input with its own morphs; nothing to generate',
+                  'needs_landmarks': 'MediaPipe found no face last time; pick the landmarks first'}
+        if st['state'] in refuse:
+            raise web.HTTPConflict(text=refuse[st['state']])
+    asyncio.get_running_loop().create_task(_run_rig(name))
+    await asyncio.sleep(0)
+    return web.json_response(rig_state(name))
+
+
 app.router.add_get('/', index)
 app.router.add_get('/api/models', api_models)
 app.router.add_get('/api/landmarks/{model}', api_landmarks_get)
 app.router.add_post('/api/landmarks/{model}', api_landmarks_post)
 app.router.add_post('/api/landmarks/{model}/render', api_landmarks_render)
+app.router.add_get('/api/rig/{model}', api_rig_get)
+app.router.add_post('/api/rig/{model}', api_rig_post)
 app.router.add_static('/', WEB_ROOT, show_index=True)
 
 

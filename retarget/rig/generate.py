@@ -310,6 +310,8 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
         'model': model, 'template': template_name, 'seconds': round(time.time() - t0, 1),
         'registration': {'scale': float(np.cbrt(np.linalg.det(reg.similarity[:3, :3]))),
                          'residual_mm': reg.residual * 1000, 'landmark_error_mm': reg.landmark_error * 1000},
+        'landmarks': {'source': json.loads((landmarks_path or MODELS / f'{model}.landmarks.json').read_text())
+                      .get('source', 'mediapipe'), 'count': int(tgt_valid.sum())},
         'face_vertices': int(face_v.sum()), 'triangles': int(len(ltris)),
         'corresponded': int((corr >= 0).sum()), 'generated': len(new_morphs),
         'max_disp_mm': {k: round(v, 1) for k, v in stats.items()},

@@ -21,7 +21,18 @@
   .row button { flex: 1; }
   button { background: #3a3a3a; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; cursor: pointer; }
   button:hover { background: #474747; }
-  button.primary { background: #2f6f4a; border-color: #3d8a5d; }
+  button.primary, a.button.primary { background: #2f6f4a; border-color: #3d8a5d; }
+  button:disabled { opacity: .45; cursor: default; }
+  a.button { display: block; text-align: center; text-decoration: none; color: var(--text); background: #3a3a3a;
+             border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; }
+  a.button[hidden] { display: none; }
+  .top { display: flex; align-items: baseline; gap: 10px; }
+  .top a { color: #9cf; text-decoration: none; white-space: nowrap; }
+  .top a:hover { text-decoration: underline; }
+  #rigLog { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; color: var(--muted); }
+  #rigLog:empty, #status:empty { display: none; }
+  #next { border: 1px solid #3c5a78; background: rgba(40,70,100,.3); border-radius: 6px; padding: 6px 8px; }
+  #next b { color: #9cf; }
   ol { margin: 0; padding-left: 22px; }
   ol li { cursor: pointer; padding: 1px 2px; border-radius: 3px; color: var(--muted); }
   ol li.current { background: #3d2a2a; color: var(--text); }
@@ -40,19 +51,24 @@
     <div id="empty"><div id="emptyMsg">No front render for this model yet.</div><button id="renderBtn">Render front view</button></div>
   </div>
   <div id="side">
-    <h1 id="title">Landmarks</h1>
+    <div class="top"><a id="backLink" href="viewer.html" title="back to the viewer">← Viewer</a><h1 id="title">Landmarks</h1></div>
     <div id="prompt"></div>
     <canvas id="guide" width="600" height="600"></canvas>
     <div class="row"><button id="skipBtn" title="S">Skip (not visible)</button><button id="undoBtn" title="Z">Undo</button></div>
     <div class="row"><button id="fitBtn">Fit face</button><button id="clearBtn">Clear all</button></div>
-    <button id="saveBtn" class="primary">Save landmarks</button>
+    <div id="next"></div>
+    <button id="saveBtn" class="primary" disabled title="keep these points (Generate uses the saved points)">Save landmarks</button>
     <div id="status"></div>
+    <button id="rigBtn" class="primary" disabled title="generate the blendshapes this model lacks from the saved points (about 1 min)">Generate blendshapes</button>
+    <div id="rigLog"></div>
+    <a id="openBtn" class="button primary" hidden>Open in viewer →</a>
     <ol id="list"></ol>
     <div class="hint">Click to place the highlighted point, drag a point to move it.
       Wheel zooms, right-drag pans. Orange points came from MediaPipe: check and drag them.
       Skip points you cannot see (a brow under the hair); eyes, nose, mouth corners and chin matter most.</div>
   </div>
 </div>
+<script src="rigjob.js"></script>
 <script>
 const params = new URLSearchParams(location.search);
 const model = params.get('model');
@@ -64,6 +80,9 @@ let skipped = new Set(), missed = new Set();
 let order = [], cur = 0, history = [];
 let T = { s: 1, x: 0, y: 0 };      // screen = image * s + (x, y)
 let drag = null;
+let dirty = false;       // points changed since they were loaded or saved
+let st = null;           // server rig state (RigJob.state): drives Generate / Open
+const locked = () => st && st.state === 'running';   // a job is reading the saved points: no edits
 
 const setStatus = s => document.getElementById('status').textContent = s;
 const loadImage = src => new Promise((ok, err) => { const i = new Image(); i.onload = () => ok(i); i.onerror = err; i.src = src + '?t=' + Date.now(); });
@@ -71,6 +90,7 @@ const loadImage = src => new Promise((ok, err) => { const i = new Image(); i.onl
 async function load() {
   if (!model) { setStatus('add ?model=<name> to the URL'); return; }
   document.getElementById('title').textContent = `Landmarks: ${model}`;
+  document.getElementById('backLink').href = `viewer.html?model=${encodeURIComponent(model)}`;
   const r = await fetch(`api/landmarks/${encodeURIComponent(model)}`);
   if (!r.ok) { setStatus(await r.text()); return; }
   info = await r.json();
@@ -82,9 +102,10 @@ async function load() {
   pts = {};
   const auto = info.source !== 'manual';
   for (const [i, [x, y]] of Object.entries(info.current)) pts[+i] = { x, y, auto };
-  if (info.source) setStatus(`existing landmarks: ${info.source} (${Object.keys(info.current).length} of ${order.length} points)`);
+  if (info.source === 'mediapipe') setStatus('Orange points come from MediaPipe: drag any that are off, then Save.');
   cur = nextOpen(0);
   resize(); fit(); renderList();
+  initRig();
 }
 
 // ---------------------------------------------------------------- view
@@ -167,8 +188,9 @@ function renderList() {
   const p = info.points[cur];
   document.getElementById('prompt').innerHTML = p
     ? `Point ${cur + 1}/${order.length}: <b>${p.key.replace(/_/g, ' ')}</b><br><span class="hint">${p.hint}</span>`
-    : 'All points placed or skipped: check them, then <b>Save</b>.';
+    : 'All points placed or skipped: check them.';
   drawGuide();
+  updateButtons();
 }
 
 function nextOpen(from) {
@@ -194,10 +216,11 @@ view.addEventListener('mousedown', e => {
   if (!img) return;
   const rect = view.getBoundingClientRect(), sx = e.clientX - rect.left, sy = e.clientY - rect.top;
   if (e.button === 2 || e.button === 1) { drag = { pan: true, sx, sy, x: T.x, y: T.y }; return; }
+  if (locked()) return;
   const hit = hitPoint(sx, sy);
   if (hit !== null) {
     history.push({ idx: hit, prev: { ...pts[hit] } });
-    drag = { idx: hit }; cur = order.indexOf(hit); renderList(); return;
+    drag = { idx: hit, moved: false }; cur = order.indexOf(hit); renderList(); return;
   }
   if (cur >= order.length) return;
   const idx = order[cur], q = toImage(sx, sy);
@@ -205,16 +228,22 @@ view.addEventListener('mousedown', e => {
   pts[idx] = { x: q.x, y: q.y, auto: false };
   skipped.delete(idx); missed.delete(idx);
   cur = nextOpen(cur + 1);
-  renderList(); draw();
+  markDirty(); renderList(); draw();
 });
 window.addEventListener('mousemove', e => {
   if (!drag) return;
   const rect = view.getBoundingClientRect(), sx = e.clientX - rect.left, sy = e.clientY - rect.top;
   if (drag.pan) { T.x = drag.x + (sx - drag.sx) * devicePixelRatio; T.y = drag.y + (sy - drag.sy) * devicePixelRatio; }
-  else { const q = toImage(sx, sy); pts[drag.idx] = { x: q.x, y: q.y, auto: false }; missed.delete(drag.idx); }
+  else { const q = toImage(sx, sy); pts[drag.idx] = { x: q.x, y: q.y, auto: false }; missed.delete(drag.idx); drag.moved = true; }
   draw();
 });
-window.addEventListener('mouseup', () => { if (drag && !drag.pan) renderList(); drag = null; });
+window.addEventListener('mouseup', () => {
+  if (drag && !drag.pan) {
+    if (drag.moved) markDirty(); else history.pop();     // a click on a point only selects it
+    renderList();
+  }
+  drag = null;
+});
 view.addEventListener('wheel', e => {
   e.preventDefault();
   const rect = view.getBoundingClientRect();
@@ -225,19 +254,24 @@ view.addEventListener('wheel', e => {
 }, { passive: false });
 
 function skip() {
-  if (cur >= order.length) return;
+  if (locked() || cur >= order.length) return;
   const idx = order[cur];
   history.push({ idx, prev: pts[idx] ? { ...pts[idx] } : null, wasSkipped: skipped.has(idx) });
   delete pts[idx]; skipped.add(idx);
-  cur = nextOpen(cur + 1); renderList(); draw();
+  cur = nextOpen(cur + 1); markDirty(); renderList(); draw();
 }
 function undo() {
+  if (locked()) return;
   const h = history.pop(); if (!h) return;
   if (h.prev) pts[h.idx] = h.prev; else delete pts[h.idx];
   if (h.wasSkipped) skipped.add(h.idx); else skipped.delete(h.idx);
-  cur = order.indexOf(h.idx); renderList(); draw();
+  cur = order.indexOf(h.idx); markDirty(); renderList(); draw();
 }
+const CORE = [33, 133, 362, 263, 1, 61, 291, 175];   // eye corners, nose tip, mouth corners, chin
+const coreCount = () => CORE.filter(i => pts[i]).length;
+const enoughPoints = () => Object.keys(pts).length >= 6 && coreCount() >= 5;
 async function save() {
+  if (locked() || !dirty || !enoughPoints()) return;
   const pixels = {};
   for (const [i, p] of Object.entries(pts)) pixels[i] = [p.x, p.y];
   const n = Object.keys(pixels).length;
@@ -250,16 +284,69 @@ async function save() {
   const res = await r.json();
   missed = new Set(res.missed);
   for (const p of Object.values(pts)) p.auto = false;
+  dirty = false;
   renderList(); draw();
   setStatus(res.missed.length
-    ? `saved ${res.count} points; ${res.missed.length} missed the face (red: no hit, or the ray went through a hole): move them slightly and save again`
-    : `saved ${res.count} points to web/models/${model}.landmarks.json.\nNow re-run the importer on the source file (it reuses these points), or:\n  python -m retarget.rig.generate ${model}\n  python -m retarget.adapter web/models/${model}.rigged.glb`);
+    ? `saved; ${res.missed.length} point(s) missed the face (red: no hit, or the ray went through a hole). Move them slightly and save again, or Generate without them.`
+    : '');
+  st = await RigJob.state(model);
+  updateButtons();
 }
+
+// ---------------------------------------------------------------- flow: Save -> Generate -> Open
+function markDirty() { dirty = true; updateButtons(); }
+function updateButtons() {
+  const lock = locked(), state = st ? st.state : null;
+  const $ = id => document.getElementById(id);
+  $('saveBtn').disabled = lock || !dirty || !enoughPoints();
+  $('rigBtn').disabled = lock || dirty || state !== 'ready' || !!(st && st.busy_with);
+  $('skipBtn').disabled = lock || cur >= order.length;
+  $('undoBtn').disabled = lock || !history.length;
+  $('clearBtn').disabled = lock || !Object.keys(pts).length;
+  const open = $('openBtn');
+  open.hidden = dirty || state !== 'up_to_date';
+  if (st && st.rigged) {
+    open.href = `viewer.html?model=${encodeURIComponent(st.rigged)}`;
+    if (state === 'up_to_date') $('backLink').href = open.href;
+  }
+  $('rigLog').textContent = RigJob.jobText(st);
+  let next;
+  if (lock) next = '<b>Generating…</b> the points are locked until it finishes.';
+  else if (dirty && !enoughPoints()) next = `Place at least the eye corners, nose tip, mouth corners and chin (${coreCount()}/8), then <b>Save</b>.`;
+  else if (dirty) next = 'Unsaved changes: <b>Save</b> them (Generate uses the saved points).';
+  else if (!st) next = '';
+  else if (st.busy_with) next = `The server is generating ${st.busy_with}; Generate when it has finished.`;
+  else if (state === 'up_to_date') next = 'Generated from these points: <b>Open in viewer</b> to try it. Change a point to redo it.';
+  else if (state === 'ready') next = `Saved (${RigJob.sourceText(st.landmarks)}). Next: <b>Generate blendshapes</b>, about 1 min.`;
+  else if (state === 'complete') next = 'This model covers every input with its own morphs; nothing to generate.';
+  else next = 'Place the points on the face, then <b>Save</b>.';
+  $('next').innerHTML = next;
+}
+async function initRig() {
+  st = await RigJob.state(model);
+  updateButtons();
+  if (st.state === 'running') { st = await RigJob.watch(model, s => { st = s; updateButtons(); }); updateButtons(); }
+}
+document.getElementById('rigBtn').onclick = async () => {
+  if (document.getElementById('rigBtn').disabled) return;
+  const r = await RigJob.start(model, s => { st = s; updateButtons(); });
+  if (r.refused) { setStatus(r.refused); st = await RigJob.state(model); }
+  updateButtons();
+};
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+document.getElementById('backLink').addEventListener('click', e => {
+  if (!dirty) return;
+  if (confirm('Leave without saving the points?')) dirty = false;   // answered here: no second prompt
+  else e.preventDefault();
+});
 document.getElementById('skipBtn').onclick = skip;
 document.getElementById('undoBtn').onclick = undo;
 document.getElementById('fitBtn').onclick = fit;
 document.getElementById('saveBtn').onclick = save;
-document.getElementById('clearBtn').onclick = () => { pts = {}; skipped.clear(); missed.clear(); history = []; cur = 0; renderList(); draw(); };
+document.getElementById('clearBtn').onclick = () => {
+  if (locked()) return;
+  pts = {}; skipped.clear(); missed.clear(); history = []; cur = 0; markDirty(); renderList(); draw();
+};
 document.getElementById('renderBtn').onclick = async () => {
   document.getElementById('emptyMsg').textContent = 'rendering (headless browser, ~10 s)…';
   const r = await fetch(`api/landmarks/${encodeURIComponent(model)}/render`, { method: 'POST' });

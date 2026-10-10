@@ -18,6 +18,25 @@
   #status { font-family: ui-monospace, monospace; font-size: 11px; white-space: pre-wrap; color: #bbb; }
   .row { display: flex; gap: 6px; }
   .row > * { flex: 1; }
+  #rigBox { border: 1px solid #3c5a78; border-radius: 6px; padding: 8px; margin: 4px 0 6px; background: rgba(40,70,100,.25); }
+  #rigInfo { margin-bottom: 6px; color: #ddd; }
+  #rigBox button.primary { background: #2f6f4a; border: 1px solid #3d8a5d; color: #fff; padding: 6px; border-radius: 4px; cursor: pointer; }
+  #rigBox button.pick { background: #9a6414; border-color: #c08a2e; color: #fff; }
+  #rigBox button:disabled { opacity: .5; cursor: default; }
+  #rigBox a { color: #9cf; font-size: 12px; }
+  #rigLog { font-family: ui-monospace, monospace; font-size: 11px; white-space: pre-wrap; color: #aaa; margin-top: 6px; }
+  #rigLog:empty, #rigMore:empty { display: none; }
+  #inputBox { border: 1px solid #3c5a78; border-radius: 6px; padding: 8px; margin: 4px 0 6px; background: rgba(40,70,100,.25); }
+  .seg { display: flex; border: 1px solid #4a6a88; border-radius: 5px; overflow: hidden; margin-bottom: 6px; }
+  #panel .seg label { flex: 1; margin: 0; justify-content: center; padding: 6px 0; cursor: pointer; color: #bbb; user-select: none; }
+  #panel .seg label + label { border-left: 1px solid #4a6a88; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  #panel .seg label:has(input:checked) { background: #2f6f4a; color: #fff; font-weight: 600; }
+  #inputHelp { color: #ccc; font-size: 12px; }
+  #panel label b { flex: 0 0 38px; text-align: right; font: 11px ui-monospace, monospace; color: #ccc; }
+  #sliderArea.off label { opacity: .35; }
+  #sliderArea.off h3 { color: #567; }
+
 </style>
 </head>
 <body>
@@ -27,16 +46,34 @@
   <div class="row"><button id="loadBtn">Load</button><button id="bgBtn">Background</button><button id="resetBtn">Reset pose</button></div>
   <label><span title="extra EMA per render tick; capture already applies a One Euro filter">Extra smoothing</span><input id="smooth" type="range" min="0" max="0.95" step="0.05" value="0"><b id="smoothVal">0.00</b></label>
   <label><span>Mirror in viewer</span><input id="mirror" type="checkbox"></label>
-  <label><span>Drive from sliders</span><input id="manual" type="checkbox"></label>
+  <h3>Face rig</h3>
+  <div id="rigBox">
+    <div id="rigInfo">…</div>
+    <button id="rigAction" class="primary" hidden></button>
+    <div id="rigMore"></div>
+    <div id="rigLog"></div>
+  </div>
+  <h3>Input</h3>
+  <div id="inputBox">
+    <div class="seg" role="radiogroup" aria-label="what drives the model">
+      <label title="follow the frames from the capture process (webcam or video)"><input type="radio" name="src" id="srcLive" checked>Live capture</label>
+      <label title="move the model by hand with the sliders, no camera needed"><input type="radio" name="src" id="manual">Sliders</label>
+    </div>
+    <div id="inputHelp"></div>
+  </div>
   <h3>Status</h3>
   <div id="status">connecting…</div>
-  <h3>Head / gaze</h3>
-  <div id="poseSliders"></div>
-  <h3>Canonical inputs (ARKit 52)</h3>
-  <div id="bsSliders"></div>
+  <div id="sliderArea">
+    <div class="row"><button id="zeroBtn" title="set every slider to 0 (neutral face, head straight)">Zero all sliders</button></div>
+    <h3>Head / gaze</h3>
+    <div id="poseSliders"></div>
+    <h3>Canonical inputs (ARKit 52)</h3>
+    <div id="bsSliders"></div>
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.8.1/dist/socket.io.min.js"></script>
+<script src="rigjob.js"></script>
 <script type="importmap">
 {
   "imports": {
@@ -162,6 +199,8 @@ async function loadModel(url, adapterUrl) {
   if (new URLSearchParams(location.search).get('lit') === '1') makeLit(root);
   frameCameraOn(root, bones.head);
   model = { root, vrm, morphTargets, bones, adapter, restQuat, rootRestQuat: root.quaternion.clone() };
+  loadedName = url.split('/').pop().replace(/\.(glb|vrm)$/, '');
+  refreshRig();
   window.viewer = { model, camera, controls, renderer, THREE, cameraInfo };
   resetSliders();
   const cov = adapter.coverageSummary ? `${adapter.coverageSummary.covered}/${adapter.coverageSummary.total}` : 'n/a';
@@ -335,7 +374,8 @@ let statusBase = '';
 function setStatus(s) { statusBase = s; refreshStatusLine(); }
 function refreshStatusLine() {
   const el = document.getElementById('status');
-  el.textContent = statusBase + `\n${socketState}` + (el.dataset.rx ? `  frames/s received: ${el.dataset.rx}` : '');
+  const ignored = document.getElementById('manual').checked ? ' (ignored: Input is Sliders)' : '';
+  el.textContent = statusBase + `\n${socketState}` + (el.dataset.rx ? `  frames/s received: ${el.dataset.rx}${ignored}` : '');
 }
 
 // ---------------------------------------------------------------- UI
@@ -350,8 +390,15 @@ function slider(parent, id, label, min, max, step, value) {
   l.innerHTML = `<span title="${label}">${label}</span>`;
   const inp = document.createElement('input');
   Object.assign(inp, { type: 'range', id, min, max, step, value });
-  l.appendChild(inp);
+  const out = document.createElement('b');
+  inp.addEventListener('input', () => showSliderValue(inp));
+  l.append(inp, out);
   parent.appendChild(l);
+  showSliderValue(inp);
+}
+function showSliderValue(inp) {
+  const v = parseFloat(inp.value);
+  inp.nextElementSibling.textContent = inp.step === '1' ? `${v}°` : v.toFixed(2);
 }
 function buildSliders() {
   const pose = document.getElementById('poseSliders');
@@ -364,16 +411,32 @@ function buildSliders() {
   for (const n of ARKIT_52) slider(bsp, 'bs_' + n, n, 0, 1, 0.01, 0);
 }
 function resetSliders() {
-  for (const n of ARKIT_52) document.getElementById('bs_' + n).value = 0;
-  for (const id of ['p_rx', 'p_ry', 'p_rz', 'p_gp', 'p_gy']) document.getElementById(id).value = 0;
+  for (const inp of document.querySelectorAll('#sliderArea input[type=range]')) { inp.value = 0; showSliderValue(inp); }
 }
+// Input source: live frames from the socket, or the sliders.  The sliders are disabled (greyed out)
+// unless they drive the model, so moving one always has a visible effect.
+function applyInputMode() {
+  const manual = document.getElementById('manual').checked;
+  const area = document.getElementById('sliderArea');
+  area.classList.toggle('off', !manual);
+  for (const inp of area.querySelectorAll('input[type=range]')) inp.disabled = !manual;
+  document.getElementById('zeroBtn').disabled = !manual;
+  document.getElementById('inputHelp').textContent = manual
+    ? 'Sliders: move the model by hand to check each ARKit input, the head and the gaze without a camera. Frames from capture are ignored meanwhile.'
+    : 'Live capture: the model follows the frames sent by the capture process (webcam or video). The sliders below are locked; pick Sliders to move the model by hand.';
+  // back to live with no capture running: show the neutral face, not the last slider pose
+  if (!manual && !lastFrame && model) applyFrame({ bs: {}, head: [0, 0, 0], gaze: [0, 0] });
+  refreshStatusLine();
+}
+for (const id of ['srcLive', 'manual']) document.getElementById(id).addEventListener('change', applyInputMode);
+document.getElementById('zeroBtn').addEventListener('click', resetSliders);
 async function populateModels() {
   const sel = document.getElementById('modelSelect');
   const models = await (await fetch('api/models')).json();
   sel.innerHTML = '';
   for (const m of models) {
     const o = document.createElement('option');
-    o.value = m.url; o.dataset.adapter = m.adapter || '';
+    o.value = m.url; o.dataset.adapter = m.adapter || ''; o.dataset.name = m.name;
     o.textContent = `${m.name} (${m.size_mb} MB${m.adapter ? ', adapter' : ''})`;
     sel.appendChild(o);
   }
@@ -384,6 +447,97 @@ document.getElementById('loadBtn').addEventListener('click', () => {
   const opt = sel.selectedOptions[0];
   if (opt) loadModel(opt.value, opt.dataset.adapter || null).catch(e => setStatus('load failed: ' + e.message));
 });
+// ---------------------------------------------------------------- face rig (landmarks / generated blendshapes)
+// Everything acts on the source model: "X.rigged" in the list means "X".  The server says where the
+// model stands (RigJob.state) and the box offers only the next step for that state.
+let loadedName = null, rigAction = null, watching = false;
+function selectedBase() {
+  const opt = document.getElementById('modelSelect').selectedOptions[0];
+  if (!opt) return null;
+  return { name: opt.dataset.name.replace(/\.rigged$/, ''), vrm: opt.value.endsWith('.vrm') };
+}
+function setRigAction(label, fn, cls = 'primary', disabled = false) {
+  const b = document.getElementById('rigAction');
+  b.hidden = !label; b.textContent = label || ''; b.className = cls; b.disabled = disabled;
+  rigAction = fn;
+}
+function renderRig(st) {
+  const info = document.getElementById('rigInfo'), more = document.getElementById('rigMore');
+  more.innerHTML = '';
+  document.getElementById('rigLog').textContent = RigJob.jobText(st);
+  const cov = st.coverage ? `${st.coverage[0]}/${st.coverage[1]}` : '?';
+  const busy = st.busy_with ? `Busy: generating ${st.busy_with}` : null;
+  const editLink = title => {
+    const a = document.createElement('a');
+    a.href = `landmarks.html?model=${encodeURIComponent(st.model)}`; a.textContent = 'Edit landmarks…'; a.title = title;
+    more.append(a);
+  };
+  switch (st.state) {
+    case 'running':
+      info.textContent = `Generating blendshapes for ${st.model}…`;
+      setRigAction('Generating…', null, 'primary', true); break;
+    case 'complete':
+      info.textContent = `Its own morphs and bones cover ${cov} inputs: nothing to generate.`;
+      setRigAction(null); break;
+    case 'ready_auto':
+      info.textContent = `Own morphs and bones cover ${cov} inputs. The rest can be generated (about 1 min; the face is found automatically).`;
+      setRigAction(busy || 'Generate blendshapes', generate, 'primary', !!busy); break;
+    case 'needs_landmarks':
+      info.textContent = `Own morphs and bones cover ${cov} inputs. MediaPipe could not find a face in this model, so place the face points by hand first.`;
+      setRigAction('Pick landmarks →', pickLandmarks, 'pick'); break;
+    case 'ready':
+      info.textContent = `Landmarks: ${RigJob.sourceText(st.landmarks)}. ` +
+        (st.rigged ? 'They changed after the last generation.' : 'Blendshapes not generated yet.');
+      setRigAction(busy || 'Generate blendshapes', generate, 'primary', !!busy);
+      editLink('move or add points before generating'); break;
+    case 'up_to_date': {
+      const rc = st.rigged_coverage ? `${st.rigged_coverage[0]}/${st.rigged_coverage[1]}` : '?';
+      info.textContent = `Generated ${st.rigged}: coverage ${cov} → ${rc}, from ${RigJob.sourceText(st.landmarks)}.`;
+      if (loadedName === st.rigged) setRigAction(null);
+      else setRigAction(`Load ${st.rigged}`, () => selectModel(st.rigged));
+      editLink('if the generated shapes look wrong, correct the points and generate again'); break;
+    }
+  }
+}
+async function refreshRig() {
+  const b = selectedBase();
+  const info = document.getElementById('rigInfo');
+  document.getElementById('rigLog').textContent = '';
+  document.getElementById('rigMore').innerHTML = '';
+  if (!b) { info.textContent = ''; setRigAction(null); return; }
+  if (b.vrm) { info.textContent = 'VRM: expressions come from the file\'s own presets; nothing to generate.'; setRigAction(null); return; }
+  let st;
+  try { st = await RigJob.state(b.name); } catch (e) { info.textContent = String(e.message || e); setRigAction(null); return; }
+  renderRig(st);
+  if (st.state === 'running' && !watching) {                // a job started elsewhere (landmark page)
+    watching = true;
+    try { afterJob(await RigJob.watch(b.name, renderRig)); } finally { watching = false; }
+  }
+}
+async function generate() {
+  if (watching) return;
+  const b = selectedBase();
+  watching = true;
+  let r;
+  try { r = await RigJob.start(b.name, renderRig); } finally { watching = false; }
+  if (r.refused) { await refreshRig(); document.getElementById('rigLog').textContent = r.refused; return; }
+  afterJob(r);
+}
+async function afterJob(st) {
+  if (st.state === 'up_to_date' && st.rigged) { await populateModels(); return selectModel(st.rigged); }
+  renderRig(st);
+}
+function pickLandmarks() { location.href = `landmarks.html?model=${encodeURIComponent(selectedBase().name)}`; }
+function selectModel(name) {
+  const sel = document.getElementById('modelSelect');
+  const opt = [...sel.options].find(o => o.dataset.name === name);
+  if (!opt) return;
+  sel.value = opt.value;
+  loadModel(opt.value, opt.dataset.adapter || null).catch(e => setStatus('load failed: ' + e.message));
+}
+document.getElementById('rigAction').addEventListener('click', () => rigAction && rigAction());
+document.getElementById('modelSelect').addEventListener('change', refreshRig);
+
 document.getElementById('bgBtn').addEventListener('click', () => {
   bgIndex = (bgIndex + 1) % BACKGROUNDS.length;
   scene.background = new THREE.Color(BACKGROUNDS[bgIndex]);
@@ -397,6 +551,7 @@ document.getElementById('smooth').addEventListener('input', e => document.getEle
 
 init();
 buildSliders();
+applyInputMode();
 {
   const params = new URLSearchParams(location.search);
   if (params.get('panel') === '0') document.getElementById('panel').style.display = 'none';
@@ -409,7 +564,8 @@ populateModels().then(models => {
   if (pick) {
     document.getElementById('modelSelect').value = pick.url;
     loadModel(pick.url, pick.adapter).catch(e => setStatus('load failed: ' + e.message));
-  } else setStatus('no models in web/models/ — run: python -m retarget.convert <file.pmx>');
+    refreshRig();
+  } else setStatus('no models in web/models/ — run: python -m retarget.importer <model file>');
 });
 </script>
 </body>

@@ -20,6 +20,7 @@ retarget/
   capture/filters.py  One Euro / EMA per-channel filters
 web/viewer.html       three.js r186 + three-vrm: loads .glb/.vrm + adapter, applies frames, slider panel
 web/landmarks.html    hand-picked landmarks when MediaPipe sees no face (P3)
+web/rigjob.js         Generate-blendshapes job client shared by both pages (server: /api/rig/<model>)
 tools/validate_glb.js gltf-validator wrapper
 tools/blender_export.py  runs inside Blender: import a scene file, export .glb with skins + shape keys
 ```
@@ -81,8 +82,11 @@ python -m retarget.capture.mediapipe_capture 0 # webcam; or a video path (+ --re
 
 Open the viewer, pick a model, Load.  Keys in the capture window: `q` quit, `c` zero the head pose,
 `f` cycle the filter (euro → none → ema, shown top-left) to compare live.
-With "Drive from sliders" ticked, the viewer ignores the socket and uses the panel sliders —
-useful to check a model's adapter without a camera.
+The viewer's **Input** box chooses what drives the model: **Live capture** (frames from the
+capture process over the socket) or **Sliders** (head, gaze and the 52 inputs by hand, to check a
+model's adapter without a camera; live frames are ignored meanwhile).  The sliders are greyed out and
+locked unless Input is Sliders, and switching back to Live with no capture running returns the
+model to the neutral face.
 
 Capture filters `bs` and `head` per channel with a One Euro filter (`retarget/capture/filters.py`;
 `--filter ema|none` for comparison), on media time for video files, so the viewer's "Extra
@@ -231,10 +235,33 @@ VS Code. Start long jobs detached (`setsid nohup python -u -m ... > log 2>&1 &`)
 When MediaPipe finds no face in the front render (model4.pmx and most anime faces; cropping does not
 help), a person places 19 points on the same render:
 
+In the browser, the viewer's **Face rig** box shows where the selected model stands and offers only
+the next step (the server computes the state, `rig_state` in `server.py`, and refuses any POST the
+state does not allow):
+
+| State | Box offers |
+| --- | --- |
+| VRM, or own morphs cover every input but tongueOut | nothing to do |
+| never tried | **Generate blendshapes** (MediaPipe first; about 1 min, then loads `<model>.rigged`) |
+| MediaPipe found no face (`<model>.landmarks_failed.json`) | **Pick landmarks →** only |
+| landmarks saved, result missing or older than them | **Generate blendshapes** |
+| result newer than the model and its landmarks | **Load `<model>.rigged`**, and *Edit landmarks…* to correct points |
+| job running | progress; everything locked |
+
+On the landmark page **Save** is enabled only with unsaved changes (and the eye corners, nose, mouth
+corners and chin placed), **Generate** only when the saved points are newer than the result, **Open in
+viewer** only when the result matches the points; editing is locked while a job runs, and leaving with
+unsaved changes asks first.  One job runs at a time; a lock file (`<model>.rig.lock`) also keeps a shell
+`importer` from writing the same files.  Generating twice from the same points gives identical morphs
+(checked: max difference 0.0 over 106 targets), so a repeat only costs the minute; the UI does not
+offer it (`POST /api/rig/<model>?force=1` does).
+
+The same from the shell:
+
 ```bash
-python -m retarget.importer NodeServer/models/model4/model4.pmx     # prints the link below on failure
+python -m retarget.importer NodeServer/models/model4/model4.pmx     # prints the picker link on failure
 # open http://127.0.0.1:6790/landmarks.html?model=model4 : click, skip what is hidden, Save
-python -m retarget.importer NodeServer/models/model4/model4.pmx     # reuses model4.landmarks.json
+python -m retarget.importer --existing model4                        # rig with the saved points
 python -m retarget.rig.landmarks <model> --render-only               # render for a model never imported
 ```
 

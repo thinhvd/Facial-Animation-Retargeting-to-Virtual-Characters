@@ -83,6 +83,7 @@ def main(argv=None):
             set('p_gp', gaze[0]); set('p_gy', gaze[1]);
             document.getElementById('smooth').value = 0;
             document.getElementById('manual').checked = true;
+            document.getElementById('manual').dispatchEvent(new Event('change'));
         }''', [values, head, gaze])
         page.wait_for_timeout(1200)
         tag = args.tag or ('_'.join(f'{k}{v:g}' for k, v in values.items()) or 'pose')
