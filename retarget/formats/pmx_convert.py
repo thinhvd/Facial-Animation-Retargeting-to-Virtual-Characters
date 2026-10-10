@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import numpy as np
 
@@ -42,7 +43,8 @@ def axis_matrix(up: str = '+y', front: str = '-z') -> np.ndarray:
 
 
 def resolve_texture(base: Path, rel: str) -> Path | None:
-    """Resolve a PMX texture path case-insensitively (files come from Windows)."""
+    """Resolve a PMX texture path case-insensitively (files come from Windows),
+    also matching percent-encoded file names."""
     rel = rel.replace('\\', '/').strip()
     cand = base / rel
     if cand.is_file():
@@ -53,8 +55,10 @@ def resolve_texture(base: Path, rel: str) -> Path | None:
             continue
         match = None
         if cur.is_dir():
+            # zip tools / git hosts sometimes store non-ASCII names percent-encoded (顔.png -> %E9%A1%94.png)
+            wanted = {part.lower(), quote(part).lower()}
             for child in cur.iterdir():
-                if child.name.lower() == part.lower():
+                if child.name.lower() in wanted or unquote(child.name).lower() == part.lower():
                     match = child
                     break
         if match is None:

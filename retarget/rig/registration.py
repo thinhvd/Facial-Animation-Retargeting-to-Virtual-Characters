@@ -146,10 +146,12 @@ def register(template_pos_all: np.ndarray, template_tris_all: np.ndarray, templa
     """Full pipeline: similarity on landmarks, then non-rigid ICP on the subset."""
     valid = tmpl_lm_valid & tgt_lm_valid
     M, inl = robust_similarity(tmpl_landmarks[valid], tgt_landmarks[valid])
+    inlier = np.zeros(len(valid), bool)
+    inlier[np.where(valid)[0][inl]] = True
     scale = np.cbrt(np.linalg.det(M[:3, :3]))
     err0 = np.linalg.norm(apply_h(M, tmpl_landmarks[valid]) - tgt_landmarks[valid], axis=1)
-    log(f'  similarity: scale={scale:.3f} landmark rms={np.sqrt((err0 ** 2).mean()) * 1000:.1f} mm '
-        f'inliers={inl.sum()}/{valid.sum()}')
+    log(f'  similarity: scale={scale:.3f} landmark rms={np.sqrt((err0[inl] ** 2).mean()) * 1000:.1f} mm '
+        f'over inliers={inl.sum()}/{valid.sum()}')
 
     # subset + local triangles
     keep = np.zeros(len(template_pos_all), bool)
@@ -159,9 +161,18 @@ def register(template_pos_all: np.ndarray, template_tris_all: np.ndarray, templa
     tris = remap[template_tris_all[keep[template_tris_all].all(1)]]
     pos = apply_h(M, template_pos_all[template_subset].astype(np.float64))
 
-    # landmark constraints: template landmark = nearest template vertex (within subset)
-    lm_ids_local = remap[tmpl_lm_vertex]
-    ok = valid & (lm_ids_local >= 0)
+    # landmark constraints: tie each template landmark (the 3D point on the template render) to the
+    # nearest vertex of the fitted subset.  The vertex of the hit triangle is not enough: eye corners
+    # and lids land on ICT's lash / eye shells, outside the subset, and the eyes went unconstrained.
+    from scipy.spatial import cKDTree
+    d_sub, nn_sub = cKDTree(template_pos_all[template_subset]).query(tmpl_landmarks)
+    lm_ids_local = np.where(d_sub < 0.005, nn_sub, -1)
+    # MediaPipe sets carry outliers (rays through eye holes, grazing hits on the outline) that would
+    # drag the template off: keep the similarity inliers.  Hand-picked sets (sparse) were checked by
+    # a person, and on a stylised face a point far from the human template is real anatomy (big eyes,
+    # small mouth), not an error: keep them all.
+    sparse = valid.sum() < 100
+    ok = (valid if sparse else inlier) & (lm_ids_local >= 0)
     deformed, X, residual = nonrigid_icp(pos, tris, target, lm_ids_local[ok], tgt_landmarks[ok], log=log, **icp_kw)
     lm_err = float(np.linalg.norm(deformed[lm_ids_local[ok]] - tgt_landmarks[ok], axis=1).mean())
     log(f'  non-rigid ICP: residual={residual * 1000:.2f} mm, landmark error={lm_err * 1000:.2f} mm')

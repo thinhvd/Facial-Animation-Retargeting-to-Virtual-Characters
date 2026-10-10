@@ -25,7 +25,7 @@
   <h3>Model</h3>
   <select id="modelSelect"></select>
   <div class="row"><button id="loadBtn">Load</button><button id="bgBtn">Background</button><button id="resetBtn">Reset pose</button></div>
-  <label><span>Smoothing</span><input id="smooth" type="range" min="0" max="0.95" step="0.05" value="0.5"><b id="smoothVal">0.50</b></label>
+  <label><span title="extra EMA per render tick; capture already applies a One Euro filter">Extra smoothing</span><input id="smooth" type="range" min="0" max="0.95" step="0.05" value="0"><b id="smoothVal">0.00</b></label>
   <label><span>Mirror in viewer</span><input id="mirror" type="checkbox"></label>
   <label><span>Drive from sliders</span><input id="manual" type="checkbox"></label>
   <h3>Status</h3>
@@ -151,7 +151,8 @@ async function loadModel(url, adapterUrl) {
     if (vrm) node = vrm.humanoid.getNormalizedBoneNode(sem);
     if (!node) {
       const names = [adapter.bones?.[sem], ...(BONE_ALIASES[sem] || [])].filter(Boolean);
-      for (const n of names) { node = root.getObjectByName(n); if (node) break; }
+      // GLTFLoader strips reserved characters from node names (mixamorig:Head -> mixamorigHead)
+      for (const n of names) { node = root.getObjectByName(n) || root.getObjectByName(THREE.PropertyBinding.sanitizeNodeName(n)); if (node) break; }
     }
     bones[sem] = node || null;
   }
@@ -313,8 +314,11 @@ function tick() {
 
 // ---------------------------------------------------------------- socket
 const socket = io('/retarget');
-socket.on('connect', () => setStatus('socket connected, waiting for frames…'));
-socket.on('disconnect', () => setStatus('socket disconnected'));
+// socket state goes on its own line: a model that loads before the socket connects keeps its
+// 'loaded …' status (tools/screenshot_viewer.py and rig/render.py wait for that prefix)
+let socketState = 'connecting…';
+socket.on('connect', () => { socketState = 'socket connected'; refreshStatusLine(); });
+socket.on('disconnect', () => { socketState = 'socket disconnected'; refreshStatusLine(); });
 socket.on('frame', frame => {
   lastFrame = frame;
   framesReceived++;
@@ -331,7 +335,7 @@ let statusBase = '';
 function setStatus(s) { statusBase = s; refreshStatusLine(); }
 function refreshStatusLine() {
   const el = document.getElementById('status');
-  el.textContent = statusBase + (el.dataset.rx ? `\nframes/s received: ${el.dataset.rx}` : '');
+  el.textContent = statusBase + `\n${socketState}` + (el.dataset.rx ? `  frames/s received: ${el.dataset.rx}` : '');
 }
 
 // ---------------------------------------------------------------- UI

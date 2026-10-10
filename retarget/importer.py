@@ -40,7 +40,8 @@ def needs_rig(adapter: dict, threshold: float = 0.6) -> bool:
     return covered < threshold * total
 
 
-def import_model(src: Path, scale: float | None, up: str, front: str, rig: bool | None, log=print) -> Path:
+def import_model(src: Path, scale: float | None, up: str | None, front: str | None, rig: bool | None,
+                 log=print) -> Path:
     name = src.stem
     glb = MODELS / f'{name}.glb' if src.suffix.lower() != '.vrm' else MODELS / f'{name}.vrm'
     log(f'[1/3] convert {src.name}')
@@ -63,7 +64,15 @@ def import_model(src: Path, scale: float | None, up: str, front: str, rig: bool 
     if (MODELS / f'{name}.landmarks.json').exists():
         log('      landmarks: reusing existing file')
     else:
-        landmarks_3d(name)
+        try:
+            landmarks_3d(name)
+        except RuntimeError as e:      # MediaPipe sees no face (stylised / anime renders)
+            log(f'      automatic landmarks failed: {e}')
+            log(f'done -> {glb.name}: drives its own morphs and bones ({s["covered"]}/{s["total"]}).')
+            log(f'      To generate the rest, pick ~20 points by hand at '
+                f'http://127.0.0.1:6790/landmarks.html?model={name}')
+            log(f'      and run this command again (it reuses {name}.landmarks.json).')
+            return glb
     generate(name, log=lambda m: log('      ' + m))
     rigged = MODELS / f'{name}.rigged.glb'
     adapter2 = write_adapter(rigged)
@@ -78,8 +87,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('src', type=Path)
     ap.add_argument('--scale', type=float, default=None)
-    ap.add_argument('--up', default='+y')
-    ap.add_argument('--front', default='-z')
+    ap.add_argument('--up', default=None, help='source up axis (default: the format\'s convention)')
+    ap.add_argument('--front', default=None, help='source facing axis (default: -z for MMD, +z otherwise)')
     g = ap.add_mutually_exclusive_group()
     g.add_argument('--rig', action='store_true', help='always generate blendshapes')
     g.add_argument('--no-rig', action='store_true', help='never generate blendshapes')

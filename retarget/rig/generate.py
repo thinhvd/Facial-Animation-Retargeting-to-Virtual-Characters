@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parents[2]
 MODELS = ROOT / 'web' / 'models'
 
 
-def load_landmarks(name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    d = json.loads((MODELS / f'{name}.landmarks.json').read_text())
+def load_landmarks(name: str, path: Path | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    d = json.loads((path or MODELS / f'{name}.landmarks.json').read_text())
     return np.array(d['points'], np.float64), np.array(d['valid'], bool), np.array(d['nearest_vertex'], np.int64)
 
 
@@ -103,13 +103,15 @@ def weld(pos: np.ndarray, tris: np.ndarray, decimals: int = 6) -> trimesh.Trimes
 
 
 def face_components(groups, tris: np.ndarray, inverse: np.ndarray, lm_vertices: np.ndarray,
-                    min_share: float = 0.1) -> np.ndarray:
+                    min_share: float = 0.1, min_size: float = 0.2) -> np.ndarray:
     """Face indices of the connected components that hold the landmarks.
 
     groups: list of face-index arrays (connected components of the welded mesh);
     lm_vertices: ORIGINAL vertex ids nearest to each valid landmark.  Returns the
     faces of the component with most landmarks plus any component holding at
-    least `min_share` of them (a face split into upper/lower pieces).
+    least `min_share` of them (a face split into upper/lower pieces) and at least
+    `min_size` of its triangle count (lashes and eye highlights carry eye-corner
+    landmarks but are not skin).
     """
     if len(groups) <= 1:
         return np.arange(len(tris))
@@ -124,7 +126,9 @@ def face_components(groups, tris: np.ndarray, inverse: np.ndarray, lm_vertices: 
     if len(hit) == 0:
         return max(groups, key=len)
     counts = np.bincount(hit, minlength=len(groups))
-    chosen = [gi for gi in range(len(groups)) if counts[gi] >= max(3, min_share * counts.sum())]
+    main = int(counts.argmax())
+    chosen = [gi for gi in range(len(groups)) if gi == main or
+              (counts[gi] >= max(3, min_share * counts.sum()) and len(groups[gi]) >= min_size * len(groups[main]))]
     return np.concatenate([groups[gi] for gi in chosen])
 
 
@@ -160,11 +164,14 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
              anchor_dist: float = 0.04, log=print, skip_existing: bool = True,
              subset: str = 'face', smooth_free: float = 0.5, smooth_corr: float = 0.05,
              identity_w: float = 0.05, identity_skin: float = 0.3, stiff_min: float = 1.0,
-             ring_width: float = 0.01) -> dict:
+             ring_width: float = 0.01, landmarks_path: Path | None = None,
+             landmark_weight: float = 5.0) -> dict:
     t0 = time.time()
     tmpl = ict.load()
     tmpl_lm, tmpl_valid, tmpl_lm_vertex = load_landmarks(template_name)
-    tgt_lm, tgt_valid, tgt_nearest = load_landmarks(model)
+    tgt_lm, tgt_valid, tgt_nearest = load_landmarks(model, landmarks_path)
+    if tgt_valid.sum() < 100:
+        log(f'[{model}] sparse landmarks: {int(tgt_valid.sum())} points (hand-picked)')
 
     glb = GLB(MODELS / f'{model}.glb')
     mesh = glb_to_canonical(glb)
@@ -187,7 +194,7 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
     stiffness = tuple(a for a in (50.0, 20.0, 10.0, 5.0, 2.0, 1.0) if a >= stiff_min) or (stiff_min,)
     reg = register(tmpl.positions.astype(np.float64), tmpl.triangles.astype(np.int64),
                    template_subset(tmpl, subset), tmpl_lm, tmpl_valid, skin, tgt_lm, tgt_valid,
-                   tmpl_lm_vertex, log=log, stiffness=stiffness)
+                   tmpl_lm_vertex, log=log, stiffness=stiffness, landmark_weight=landmark_weight)
 
     # deformed template subset as a mesh
     keep = np.zeros(tmpl.vertex_count, bool)
@@ -220,6 +227,20 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
     skin_w[np.unique(wtris[biggest])] = True
     exterior = skin_w & (dist_all < face_dist) & (agree > 0.3) & ~rigid_w
     attachable = ~skin_w & (dist_all < face_dist) & (agree > 0.3) & ~rigid_w
+    # A floating piece rides on the skin only if it sits inside the solved region (brows, lashes).
+    # A piece that reaches beyond it is hair (fringe, side locks): it stays with the head bone,
+    # otherwise raising the brows bends the fringe.
+    comp_w = -np.ones(len(wpos), np.int64)
+    for gi, g in enumerate(groups):
+        comp_w[wtris[g].ravel()] = gi
+    hair = []
+    for gi in np.unique(comp_w[attachable]):
+        verts = comp_w == gi
+        if (dist_all[verts] < anchor_dist).mean() < 0.8:
+            attachable &= ~verts
+            hair.append(int(verts.sum()))
+    if hair:
+        log(f'[transfer] {len(hair)} floating pieces reach outside the face (hair?) and stay rigid: {sum(hair)} vertices')
     # only the face pieces and the attachable shells enter the system; hair strands, clothes and
     # other parts near the face stay out (they would add tens of thousands of unknowns)
     near_v = ((dist_all < anchor_dist) & skin_w & ~rigid_w) | attachable

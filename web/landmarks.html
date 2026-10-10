@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Landmark picker</title>
+<style>
+  :root { color-scheme: dark; --bg: #202020; --panel: #2a2a2a; --line: #444; --text: #eee; --muted: #aaa;
+          --accent: #ff4d4d; --done: #5fd38d; --auto: #ffb347; --miss: #ff6b6b; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, sans-serif; }
+  #app { display: flex; height: 100%; }
+  #stage { flex: 1; position: relative; overflow: hidden; cursor: crosshair; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  #side { width: 340px; flex: 0 0 340px; background: var(--panel); border-left: 1px solid var(--line);
+          display: flex; flex-direction: column; padding: 12px; box-sizing: border-box; gap: 10px; overflow: auto; }
+  h1 { font-size: 15px; margin: 0; }
+  #prompt { font-size: 14px; }
+  #prompt b { color: var(--accent); }
+  #guide { width: 100%; aspect-ratio: 1; background: #111; border-radius: 6px; }
+  .row { display: flex; gap: 6px; }
+  .row button { flex: 1; }
+  button { background: #3a3a3a; color: var(--text); border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; cursor: pointer; }
+  button:hover { background: #474747; }
+  button.primary { background: #2f6f4a; border-color: #3d8a5d; }
+  ol { margin: 0; padding-left: 22px; }
+  ol li { cursor: pointer; padding: 1px 2px; border-radius: 3px; color: var(--muted); }
+  ol li.current { background: #3d2a2a; color: var(--text); }
+  ol li.placed { color: var(--done); }
+  ol li.auto { color: var(--auto); }
+  ol li.skipped { text-decoration: line-through; }
+  ol li.missed { color: var(--miss); }
+  #status { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; color: var(--muted); }
+  .hint { color: var(--muted); font-size: 12px; }
+  #empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 10px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage"><canvas id="view"></canvas>
+    <div id="empty"><div id="emptyMsg">No front render for this model yet.</div><button id="renderBtn">Render front view</button></div>
+  </div>
+  <div id="side">
+    <h1 id="title">Landmarks</h1>
+    <div id="prompt"></div>
+    <canvas id="guide" width="600" height="600"></canvas>
+    <div class="row"><button id="skipBtn" title="S">Skip (not visible)</button><button id="undoBtn" title="Z">Undo</button></div>
+    <div class="row"><button id="fitBtn">Fit face</button><button id="clearBtn">Clear all</button></div>
+    <button id="saveBtn" class="primary">Save landmarks</button>
+    <div id="status"></div>
+    <ol id="list"></ol>
+    <div class="hint">Click to place the highlighted point, drag a point to move it.
+      Wheel zooms, right-drag pans. Orange points came from MediaPipe: check and drag them.
+      Skip points you cannot see (a brow under the hair); eyes, nose, mouth corners and chin matter most.</div>
+  </div>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+const model = params.get('model');
+const view = document.getElementById('view'), ctx = view.getContext('2d');
+const guide = document.getElementById('guide'), gctx = guide.getContext('2d');
+let info = null, img = null, guideImg = null;
+let pts = {};            // mediapipe index -> {x, y, auto}
+let skipped = new Set(), missed = new Set();
+let order = [], cur = 0, history = [];
+let T = { s: 1, x: 0, y: 0 };      // screen = image * s + (x, y)
+let drag = null;
+
+const setStatus = s => document.getElementById('status').textContent = s;
+const loadImage = src => new Promise((ok, err) => { const i = new Image(); i.onload = () => ok(i); i.onerror = err; i.src = src + '?t=' + Date.now(); });
+
+async function load() {
+  if (!model) { setStatus('add ?model=<name> to the URL'); return; }
+  document.getElementById('title').textContent = `Landmarks: ${model}`;
+  const r = await fetch(`api/landmarks/${encodeURIComponent(model)}`);
+  if (!r.ok) { setStatus(await r.text()); return; }
+  info = await r.json();
+  order = info.points.map(p => p.index);
+  guideImg = await loadImage(info.guide.png).catch(() => null);
+  if (!info.png) { document.getElementById('empty').style.display = 'flex'; drawGuide(); renderList(); return; }
+  document.getElementById('empty').style.display = 'none';
+  img = await loadImage(info.png);
+  pts = {};
+  const auto = info.source !== 'manual';
+  for (const [i, [x, y]] of Object.entries(info.current)) pts[+i] = { x, y, auto };
+  if (info.source) setStatus(`existing landmarks: ${info.source} (${Object.keys(info.current).length} of ${order.length} points)`);
+  cur = nextOpen(0);
+  resize(); fit(); renderList();
+}
+
+// ---------------------------------------------------------------- view
+function resize() {
+  const r = view.getBoundingClientRect();
+  view.width = r.width * devicePixelRatio; view.height = r.height * devicePixelRatio;
+  draw();
+}
+function fit() {
+  if (!img) return;
+  const vw = view.width, vh = view.height;
+  // the face sits around the image centre in these renders; with points, frame them instead
+  let box = [img.width * 0.3, img.height * 0.25, img.width * 0.7, img.height * 0.75];
+  const ps = Object.values(pts);
+  if (ps.length >= 3) {
+    const xs = ps.map(p => p.x), ys = ps.map(p => p.y);
+    const w = Math.max(...xs) - Math.min(...xs), h = Math.max(...ys) - Math.min(...ys), m = Math.max(w, h) * 0.35;
+    box = [Math.min(...xs) - m, Math.min(...ys) - m, Math.max(...xs) + m, Math.max(...ys) + m];
+  }
+  T.s = Math.min(vw / (box[2] - box[0]), vh / (box[3] - box[1]));
+  T.x = vw / 2 - T.s * (box[0] + box[2]) / 2;
+  T.y = vh / 2 - T.s * (box[1] + box[3]) / 2;
+  draw();
+}
+const toImage = (sx, sy) => ({ x: (sx * devicePixelRatio - T.x) / T.s, y: (sy * devicePixelRatio - T.y) / T.s });
+const toScreen = p => ({ x: p.x * T.s + T.x, y: p.y * T.s + T.y });
+
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#202020'; ctx.fillRect(0, 0, view.width, view.height);
+  if (!img) return;
+  ctx.setTransform(T.s, 0, 0, T.s, T.x, T.y);
+  ctx.imageSmoothingEnabled = T.s < 2;
+  ctx.drawImage(img, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const r = 5 * devicePixelRatio;
+  order.forEach((idx, k) => {
+    const p = pts[idx]; if (!p) return;
+    const s = toScreen(p);
+    ctx.beginPath(); ctx.arc(s.x, s.y, k === cur ? r * 1.6 : r, 0, Math.PI * 2);
+    ctx.fillStyle = missed.has(idx) ? '#ff6b6b' : p.auto ? '#ffb347' : '#5fd38d';
+    ctx.fill(); ctx.lineWidth = devicePixelRatio; ctx.strokeStyle = k === cur ? '#fff' : '#000'; ctx.stroke();
+    ctx.font = `${11 * devicePixelRatio}px system-ui`; ctx.fillStyle = '#fff';
+    ctx.fillText(String(k + 1), s.x + r + 2, s.y - r);
+  });
+}
+
+function drawGuide() {
+  gctx.fillStyle = '#111'; gctx.fillRect(0, 0, guide.width, guide.height);
+  if (!guideImg || !info) return;
+  const g = info.guide.pixels, all = Object.values(g);
+  if (!all.length) { gctx.drawImage(guideImg, 0, 0, guide.width, guide.height); return; }
+  const xs = all.map(p => p[0]), ys = all.map(p => p[1]);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const half = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) * 0.65;
+  const sc = guide.width / (2 * half);
+  gctx.drawImage(guideImg, cx - half, cy - half, 2 * half, 2 * half, 0, 0, guide.width, guide.height);
+  const want = order[cur];
+  for (const [i, [x, y]] of Object.entries(g)) {
+    const gx = (x - cx + half) * sc, gy = (y - cy + half) * sc, on = +i === want;
+    gctx.beginPath(); gctx.arc(gx, gy, on ? 9 : 4, 0, Math.PI * 2);
+    gctx.fillStyle = on ? '#ff4d4d' : 'rgba(255,255,255,.45)'; gctx.fill();
+    if (on) { gctx.lineWidth = 3; gctx.strokeStyle = '#fff'; gctx.stroke(); }
+  }
+}
+
+function renderList() {
+  const ol = document.getElementById('list');
+  ol.innerHTML = '';
+  info.points.forEach((p, k) => {
+    const li = document.createElement('li');
+    li.textContent = p.key.replace(/_/g, ' ');
+    if (pts[p.index]) li.classList.add(pts[p.index].auto ? 'auto' : 'placed');
+    if (skipped.has(p.index)) li.classList.add('skipped');
+    if (missed.has(p.index)) li.classList.add('missed');
+    if (k === cur) li.classList.add('current');
+    li.onclick = () => { cur = k; renderList(); draw(); };
+    ol.appendChild(li);
+  });
+  const p = info.points[cur];
+  document.getElementById('prompt').innerHTML = p
+    ? `Point ${cur + 1}/${order.length}: <b>${p.key.replace(/_/g, ' ')}</b><br><span class="hint">${p.hint}</span>`
+    : 'All points placed or skipped: check them, then <b>Save</b>.';
+  drawGuide();
+}
+
+function nextOpen(from) {
+  for (let k = 0; k < order.length; k++) {
+    const j = (from + k) % order.length;
+    if (!pts[order[j]] && !skipped.has(order[j])) return j;
+  }
+  return order.length;   // done
+}
+
+// ---------------------------------------------------------------- input
+function hitPoint(sx, sy) {
+  const r = 9 * devicePixelRatio;
+  for (const idx of order) {
+    const p = pts[idx]; if (!p) continue;
+    const s = toScreen(p);
+    if (Math.hypot(s.x - sx * devicePixelRatio, s.y - sy * devicePixelRatio) < r) return idx;
+  }
+  return null;
+}
+view.addEventListener('contextmenu', e => e.preventDefault());
+view.addEventListener('mousedown', e => {
+  if (!img) return;
+  const rect = view.getBoundingClientRect(), sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  if (e.button === 2 || e.button === 1) { drag = { pan: true, sx, sy, x: T.x, y: T.y }; return; }
+  const hit = hitPoint(sx, sy);
+  if (hit !== null) {
+    history.push({ idx: hit, prev: { ...pts[hit] } });
+    drag = { idx: hit }; cur = order.indexOf(hit); renderList(); return;
+  }
+  if (cur >= order.length) return;
+  const idx = order[cur], q = toImage(sx, sy);
+  history.push({ idx, prev: pts[idx] ? { ...pts[idx] } : null, wasSkipped: skipped.has(idx) });
+  pts[idx] = { x: q.x, y: q.y, auto: false };
+  skipped.delete(idx); missed.delete(idx);
+  cur = nextOpen(cur + 1);
+  renderList(); draw();
+});
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const rect = view.getBoundingClientRect(), sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  if (drag.pan) { T.x = drag.x + (sx - drag.sx) * devicePixelRatio; T.y = drag.y + (sy - drag.sy) * devicePixelRatio; }
+  else { const q = toImage(sx, sy); pts[drag.idx] = { x: q.x, y: q.y, auto: false }; missed.delete(drag.idx); }
+  draw();
+});
+window.addEventListener('mouseup', () => { if (drag && !drag.pan) renderList(); drag = null; });
+view.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = view.getBoundingClientRect();
+  const sx = (e.clientX - rect.left) * devicePixelRatio, sy = (e.clientY - rect.top) * devicePixelRatio;
+  const k = Math.exp(-e.deltaY * 0.0015);
+  T.x = sx - (sx - T.x) * k; T.y = sy - (sy - T.y) * k; T.s *= k;
+  draw();
+}, { passive: false });
+
+function skip() {
+  if (cur >= order.length) return;
+  const idx = order[cur];
+  history.push({ idx, prev: pts[idx] ? { ...pts[idx] } : null, wasSkipped: skipped.has(idx) });
+  delete pts[idx]; skipped.add(idx);
+  cur = nextOpen(cur + 1); renderList(); draw();
+}
+function undo() {
+  const h = history.pop(); if (!h) return;
+  if (h.prev) pts[h.idx] = h.prev; else delete pts[h.idx];
+  if (h.wasSkipped) skipped.add(h.idx); else skipped.delete(h.idx);
+  cur = order.indexOf(h.idx); renderList(); draw();
+}
+async function save() {
+  const pixels = {};
+  for (const [i, p] of Object.entries(pts)) pixels[i] = [p.x, p.y];
+  const n = Object.keys(pixels).length;
+  const core = [33, 133, 362, 263, 1, 61, 291, 175].filter(i => pixels[i]).length;
+  if (n < 6 || core < 5) { setStatus(`place at least the eye corners, nose tip, mouth corners and chin first (${core}/8 of those)`); return; }
+  setStatus('saving…');
+  const r = await fetch(`api/landmarks/${encodeURIComponent(model)}`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pixels }) });
+  if (!r.ok) { setStatus('save failed: ' + await r.text()); return; }
+  const res = await r.json();
+  missed = new Set(res.missed);
+  for (const p of Object.values(pts)) p.auto = false;
+  renderList(); draw();
+  setStatus(res.missed.length
+    ? `saved ${res.count} points; ${res.missed.length} missed the face (red: no hit, or the ray went through a hole): move them slightly and save again`
+    : `saved ${res.count} points to web/models/${model}.landmarks.json.\nNow re-run the importer on the source file (it reuses these points), or:\n  python -m retarget.rig.generate ${model}\n  python -m retarget.adapter web/models/${model}.rigged.glb`);
+}
+document.getElementById('skipBtn').onclick = skip;
+document.getElementById('undoBtn').onclick = undo;
+document.getElementById('fitBtn').onclick = fit;
+document.getElementById('saveBtn').onclick = save;
+document.getElementById('clearBtn').onclick = () => { pts = {}; skipped.clear(); missed.clear(); history = []; cur = 0; renderList(); draw(); };
+document.getElementById('renderBtn').onclick = async () => {
+  document.getElementById('emptyMsg').textContent = 'rendering (headless browser, ~10 s)…';
+  const r = await fetch(`api/landmarks/${encodeURIComponent(model)}/render`, { method: 'POST' });
+  if (!r.ok) { document.getElementById('emptyMsg').textContent = 'render failed: ' + await r.text(); return; }
+  load();
+};
+window.addEventListener('keydown', e => {
+  if (e.key === 's' || e.key === 'S') skip();
+  else if (e.key === 'z' || e.key === 'Z' || e.key === 'Backspace') undo();
+  else if (e.key === 'f' || e.key === 'F') fit();
+});
+window.addEventListener('resize', resize);
+load();
+</script>
+</body>
+</html>

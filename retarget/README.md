@@ -10,12 +10,18 @@ retarget/
   formats/pmx.py      PMX 2.x reader (vertices, faces, materials, bones, morphs)
   formats/pmx_convert.py   PMX -> CanonicalMesh (axis remap, MMD units -> metres)
   formats/gltf_writer.py   CanonicalMesh -> .glb (skin, morph targets with targetNames, KHR_materials_unlit)
+  formats/gltf_convert.py  any .glb/.gltf -> CanonicalMesh (flattens meshes, node transforms, skins, morphs by name)
+  formats/blender.py       Blender subprocess for .fbx/.blend/.dae (and Draco/meshopt .glb)
+  formats/orient.py        guess up/front axes and unit scale from the skeleton
   convert.py          CLI: model -> web/models/<name>.glb
   adapter.py          CLI: .glb -> <name>.adapter.json (bones, morph drivers, coverage report)
   server.py           aiohttp static server + Socket.IO relay (namespace /retarget)
   capture/mediapipe_capture.py   webcam/video -> canonical frames
+  capture/filters.py  One Euro / EMA per-channel filters
 web/viewer.html       three.js r186 + three-vrm: loads .glb/.vrm + adapter, applies frames, slider panel
+web/landmarks.html    hand-picked landmarks when MediaPipe sees no face (P3)
 tools/validate_glb.js gltf-validator wrapper
+tools/blender_export.py  runs inside Blender: import a scene file, export .glb with skins + shape keys
 ```
 
 ## Setup
@@ -25,21 +31,46 @@ conda env create -f environment.yml && conda activate fr
 curl -L -o weights/face_landmarker.task \
   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
 npm i -g gltf-validator          # optional, for tools/validate_glb.js
+# optional, for .fbx / .blend / .dae: portable Blender 4.5 LTS into data/blender/ (no root; ~1 GB unpacked)
+mkdir -p data/blender && cd data/blender && \
+  curl -LO https://mirror.freedif.org/blender/release/Blender4.5/blender-4.5.14-linux-x64.tar.xz && \
+  tar -xJf blender-4.5.14-linux-x64.tar.xz && rm blender-4.5.14-linux-x64.tar.xz && cd ../..
 ```
+
+`retarget/formats/blender.py` looks for `$BLENDER`, then `blender` on PATH, then `data/blender/*/blender`.
 
 ## Convert a model
 
 ```bash
 python -m retarget.convert NodeServer/models/headmodel/HeadA.pmx            # -> web/models/HeadA.glb
 python -m retarget.convert NodeServer/models/model1/kizunaai.pmx
-# a PMX exported from a Z-up rig (mmd_tools), 0.18 units tall:
-python -m retarget.convert NodeServer/models/HumanModel/MaleModel/MaleModel.pmx --up=-z --front=-y --scale 10
+python -m retarget.convert NodeServer/models/HumanModel/FemaleModel/FemaleModel.fbx   # via Blender
 python -m retarget.adapter web/models/*.glb                                 # -> *.adapter.json + coverage
 node tools/validate_glb.js web/models/*.glb
 ```
 
-`.glb` and `.vrm` files are copied through; put them in `web/models/` and run the adapter step.
-FBX/OBJ/blend need Blender (not wired yet; see proposal P0).
+| Input | Path |
+| --- | --- |
+| .pmx, .obj | pure Python |
+| .glb, .gltf | pure Python, flattened to one mesh (`gltf_convert`) |
+| .fbx, .blend, .dae; .glb with Draco / meshopt | Blender → .glb → `gltf_convert` |
+| .vrm | copied through (the writer would drop MToon, spring bones, expressions) |
+| .pmd | not supported (needs the MMD Tools add-on in Blender) |
+
+**Axes and units** are guessed from the skeleton when `--up/--front/--scale` are not given:
+up = head bone minus hips/neck, left = mean of (left − right) over bones paired by name
+(`Left*`, `左*`, `*_L`, `*.L`), front = left × up, and a power-of-ten scale when the height is
+implausible (0.5–4 m with leg bones, 0.1–1 m for a head).  On the repo models this leaves the six
+correct MMD models alone and fixes the three Z-up exports (MaleModel.pmx, testFemale1.pmx,
+FemaleModel.fbx, all `up=+z front=-y`, ×10 / ×100); the orientation matches the hand-set flags to 1e-7.
+Explicit flags still win (`--up=-z --front=-y --scale 10` for MaleModel.pmx as before).
+
+`gltf_convert` bakes the rest pose as three.js draws it: skinned vertices through
+world(joint) · inverseBind, rigid meshes through their node, and binds rigid meshes that hang below a
+joint (glasses under the head) to that joint.  Round trip on the canonical HeadA/model2 .glb is exact.
+Checked on external samples from the three.js repo: RobotExpressive (14 meshes, 2 skins, rigid parts
+parented to bones) and Xbot (Mixamo).  Mixamo bone names lose the `:` in three.js
+(`mixamorig:Head` → `mixamorigHead`); the viewer looks up both spellings.
 
 ## Run
 
@@ -48,9 +79,21 @@ python -m retarget.server                      # http://127.0.0.1:6790/
 python -m retarget.capture.mediapipe_capture 0 # webcam; or a video path (+ --realtime)
 ```
 
-Open the viewer, pick a model, Load.  Keys in the capture window: `q` quit, `c` zero the head pose.
+Open the viewer, pick a model, Load.  Keys in the capture window: `q` quit, `c` zero the head pose,
+`f` cycle the filter (euro → none → ema, shown top-left) to compare live.
 With "Drive from sliders" ticked, the viewer ignores the socket and uses the panel sliders —
 useful to check a model's adapter without a camera.
+
+Capture filters `bs` and `head` per channel with a One Euro filter (`retarget/capture/filters.py`;
+`--filter ema|none` for comparison), on media time for video files, so the viewer's "Extra
+smoothing" stays at 0.  `--dump frames.jsonl` writes raw and filtered values per frame.
+Defaults: blendshapes `min_cutoff 1.5 Hz, beta 5`, head `0.7 Hz, 0.2`.  On synthetic noise
+(0.4° head) this gives the jitter of a heavy EMA (0.18° vs 0.14° for smoothing 0.8) with the
+step latency of the old light one (90 % in one frame vs 333 ms).
+
+The webcam opens as MJPG at 30 fps with `exposure_auto_priority=0` (Linux, V4L2).  With priority 1
+the test webcam stretched its exposure in room light and fell to 7.7 fps (30.3 fps with 0); at that
+rate a blink is one frame and no filter setting reduced shimmer without delaying blinks.
 
 ## Canonical frame
 
@@ -131,10 +174,12 @@ Gate results (identity held out, blendshapes hidden, error over face vertices th
 
 | Target | Topology | Mean error | p95 | Worst |
 | --- | --- | --- | --- | --- |
-| identity 7 | same as template (26,719 v, with interior shells) | 0.70 mm (0.8 % IOD) | 0.93 mm | mouthRollUpper 3.5 mm |
-| identity 7, remesh 50 % | different (5,648 v) | 0.34 mm (0.4 % IOD) | 0.85 mm | mouthClose 1.8 mm |
-| identity 23, remesh 30 % | different (3,399 v) | 0.35 mm (0.4 % IOD) | 0.86 mm | mouthClose 1.5 mm |
-| identity 42, coeff 1.5 | same as template | 0.75 mm (0.8 % IOD) | 1.00 mm | mouthRollUpper 3.8 mm |
+| identity 7 | same as template (26,719 v, with interior shells) | 0.57 mm (0.6 % IOD) | 0.82 mm | mouthRollUpper 2.2 mm |
+| identity 7, remesh 50 % | different (5,648 v) | 0.23 mm (0.3 % IOD) | 0.55 mm | mouthClose 1.6 mm |
+| identity 23, remesh 30 % | different (3,399 v) | 0.27 mm (0.3 % IOD) | 0.66 mm | mouthClose 1.7 mm |
+| identity 42, coeff 1.5 | same as template | 0.65 mm (0.7 % IOD) | 0.90 mm | mouthRollUpper 2.5 mm |
+
+(P3 registration fixes, below, took these from 0.70 / 0.34 / 0.35 / 0.75 mm.)
 
 The same-topology targets score worse only because they carry ICT's interior shells (gums, tongue
 move up to 30 mm in jawOpen and are left free); on the face skin alone the numbers match the remeshed
@@ -150,7 +195,9 @@ python -m retarget.importer scan.obj --rig                                      
 ```
 
 `importer` = convert → adapter → (if brow+mouth coverage < 60 % and not a VRM) landmarks → generate →
-adapter again. The adapter ranks sources per canonical input:
+adapter again.  When MediaPipe finds no face in the render (stylised faces such as model4.pmx, robots,
+faceless mannequins) the importer stops after the adapter: the model still drives its own morphs and
+bones, and the missing blendshapes need hand-picked landmarks. The adapter ranks sources per canonical input:
 
 1. VRM expression presets (`aa`, `blink`, `lookUp`, …; emotion presets `happy/angry/sad/relaxed/surprised`
    are off by default because they move eyes + mouth + brows at once — `--emotions` enables them)
@@ -167,6 +214,10 @@ adapter again. The adapter ranks sources per canonical input:
 | MaleModel.pmx | 0/52 | 51/52 | 51 generated |
 | model2.pmx (MMD, face is a separate mesh piece) | 24/52 | 51/52 | 16 artist morphs, 8 bone, 27 generated |
 | testFemale1.pmx (`--up=-z --front=-y --scale 10`) | 0/52 | 51/52 | 51 generated, one command |
+| HeadB.pmx (first import, no flags) | 34/52 | 52/52 | 26 artist morphs, 8 bone, 18 generated; 56 s |
+| model3.pmx (full-body anime) | 26/52 | 51/52 | 18 artist morphs, 8 bone, 25 generated; 64 s |
+| FemaleModel.fbx (Z-up, 0.17 m; auto-oriented, ×10) | 0/52 | 51/52 | 51 generated; Blender 1.5 s + generate 47 s; no eye bones, so no eyeball gaze |
+| model4.pmx (anime) | 22/52 | 22/52 → 51/52 with clicks | MediaPipe finds no face (also on tight crops); 13 hand-picked points, see P3 |
 
 VRM files are not rigged: the writer would drop the VRM extensions (MToon, spring bones). Their
 custom morphs cover most of what the presets miss.
@@ -174,6 +225,65 @@ custom morphs cover most of what the presets miss.
 Resource note: generate (~1 min, a few GB for large meshes) and each headless-Chromium render
 (~1–2 GB) should run one at a time on a 16 GB machine; running several in parallel has crashed
 VS Code. Start long jobs detached (`setsid nohup python -u -m ... > log 2>&1 &`).
+
+## P3: hand-picked landmarks (web/landmarks.html)
+
+When MediaPipe finds no face in the front render (model4.pmx and most anime faces; cropping does not
+help), a person places 19 points on the same render:
+
+```bash
+python -m retarget.importer NodeServer/models/model4/model4.pmx     # prints the link below on failure
+# open http://127.0.0.1:6790/landmarks.html?model=model4 : click, skip what is hidden, Save
+python -m retarget.importer NodeServer/models/model4/model4.pmx     # reuses model4.landmarks.json
+python -m retarget.rig.landmarks <model> --render-only               # render for a model never imported
+```
+
+The page shows the render (wheel zoom, right-drag pan) and the ICT template with the next point in
+red.  Points: 4 eye corners, 4 lid midpoints, 4 brow ends, nose tip, 2 mouth corners, top of the upper
+lip, the mouth line centre (stands for MediaPipe 13 and 14), bottom of the lower lip, front of the chin
+(`CLICK_POINTS` in `rig/landmarks.py`).  Outline points (MediaPipe 234/454, chin bottom 152) are left out:
+the ray grazes the surface there and a few pixels move the 3D point by centimetres.  Saved clicks go
+through the same ray cast as MediaPipe's, under their MediaPipe indices, so registration is unchanged.
+A click whose ray hits nothing, or lands far behind the other points (through an eye socket), comes
+back red.  With MediaPipe landmarks present the page pre-fills them (orange) for correction.
+
+Simulated clicks on the gate (MediaPipe pixels of the 19 points + Gaussian noise, `evaluate --clicks
+--click-noise 3`): identity 7 remesh 50 % 0.24 mm, identity 23 remesh 30 % 0.25 mm, i.e. as good as
+478 detected points, and flat from 0 to 6 px of noise.
+
+Getting there needed three registration fixes, which also improved the automatic path:
+
+* **Template landmarks bound to the fitted skin.**  Each template landmark used the vertex of the triangle
+  its ray hit; for eye corners and lids that is ICT's lash / eye shell, outside the fitted subset, so the
+  eyes were never constrained.  Now the nearest subset vertex within 5 mm (468 of 478 landmarks instead
+  of 421).
+* **Only similarity inliers constrain ICP** for MediaPipe sets (rays through an eye hole used to pull).
+* **Hand-picked sets are trusted as a whole.**  On model4 a similarity explains only 4 of 14 clicked
+  points (the eyes are far larger than a human's); treating the rest as outliers left them out of ICP.
+  Sparse sets (< 100 points) now constrain ICP with every point; bad clicks are caught at the ray cast.
+
+model4.pmx, all 19 points clicked by hand: registered template landmarks within 0.6 px of the clicks,
+coverage 22 → 51/52 (14 artist morphs, 8 bone, 29 generated).  Generated mouth shapes (pucker, funnel)
+read well; generated eye shapes (squint, wide) barely show, since ICT moves a human lid by millimetres
+and the anime eye is a large textured piece.  Blinks come from the model's own morphs.
+
+That run exposed two problems with hair and hidden geometry, fixed for every model:
+
+* **Ray cast = what the render shows.**  Rays skip fully transparent materials (MMD expression overlays
+  such as 青ざめ / 紅潮, alpha 0 until a material morph shows them), and each ray takes its first hit on
+  the mesh pieces the core points (eye corners, nose, mouth corners, chin) landed on.  Brows clicked on
+  the fringe now land on the forehead behind it (z 0.111 → 0.103 m on model4).
+* **Hair stays rigid.**  A floating piece rides on the skin only if ≥ 80 % of it lies in the solved region
+  (brows, lashes); the fringe used to bend with the brows: model4 前髪 moved 4.9 mm on 75 vertices in
+  browInnerUp, model3 前髪 5.6 mm on 171 vertices in browDown, more than the brows themselves.  Now 0 on
+  model4 and 8 vertices on model3, while model3's brows move 4 mm instead of 2.  Extra fitting pieces
+  must also be ≥ 20 % of the main piece's size, so lashes and eye highlights hit by eye-corner points do
+  not count as skin.
+
+MediaPipe on anime renders is luck: it found model3's face while the iris texture was missing (white
+eyes) and finds nothing now that the eyes render; model3 keeps its earlier landmarks, re-projected with
+the new ray cast.  The viewer no longer overwrites its `loaded …` status when the socket connects after
+a fast load (that race made `render_front` time out at random).
 
 ## Current coverage (P0)
 
