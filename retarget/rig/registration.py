@@ -102,9 +102,9 @@ def nonrigid_icp(template_pos: np.ndarray, template_tris: np.ndarray, target: tr
     D = D_of(hom)
 
     X = np.tile(np.r_[np.eye(3), np.zeros((1, 3))], (n, 1))   # (4n, 3): identity affines
-    prox = trimesh.proximity.ProximityQuery(target)
-    tnormals = target.face_normals
-    tmpl_normals = vertex_normals(template_pos, template_tris)
+    from .geometry import SurfaceQuery
+    prox = SurfaceQuery(np.asarray(target.vertices), np.asarray(target.faces))
+    tnormals = prox.face_normals
 
     lm_rows = None
     if lm_template_ids is not None and len(lm_template_ids):
@@ -114,7 +114,7 @@ def nonrigid_icp(template_pos: np.ndarray, template_tris: np.ndarray, target: tr
     for alpha in stiffness:
         for it in range(max_inner):
             cur = D @ X                                  # (n, 3) current deformed positions
-            closest, dist, tri_id = prox.on_surface(cur)
+            closest, dist, tri_id = prox.closest(cur)
             cur_normals = vertex_normals(cur, template_tris)
             w = ((dist < max_dist) & ((cur_normals * tnormals[tri_id]).sum(1) > normal_cos)).astype(np.float64)
             W = sp.diags(w)

@@ -157,9 +157,10 @@ def correspond_triangles(target_pos: np.ndarray, target_tris: np.ndarray,
                          max_dist: float = 0.012, normal_cos: float = 0.6) -> np.ndarray:
     """For each target triangle, the template triangle whose surface is closest to
     its centroid (distance + normal gated), else -1."""
-    tmpl = trimesh.Trimesh(tmpl_pos, tmpl_tris, process=False)
+    from .geometry import SurfaceQuery
+    tmpl = SurfaceQuery(tmpl_pos, tmpl_tris)
     cent = target_pos[target_tris].mean(1)
-    tn = trimesh.Trimesh(target_pos, target_tris, process=False).face_normals
-    closest, dist, tri_id = trimesh.proximity.ProximityQuery(tmpl).on_surface(cent)
+    tn = SurfaceQuery(target_pos, target_tris, k=1).face_normals
+    closest, dist, tri_id = tmpl.closest(cent)
     ok = (dist < max_dist) & ((tn * tmpl.face_normals[tri_id]).sum(1) > normal_cos)
     return np.where(ok, tri_id, -1)

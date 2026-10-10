@@ -63,8 +63,9 @@ def make_target(tmpl: ict.ICTTemplate, identity: int, coeff: float, remesh: floa
     new_pos = np.asarray(new_pos, np.float64)
     new_tris = np.asarray(new_tris, np.int64)
     # ground truth on the new vertices: barycentric interpolation of the template deltas
+    from .geometry import SurfaceQuery
     src = trimesh.Trimesh(src_pos, src_tris, process=False)
-    closest, dist, tri_id = trimesh.proximity.ProximityQuery(src).on_surface(new_pos)
+    closest, dist, tri_id = SurfaceQuery(src_pos, src_tris).closest(new_pos)
     bary = trimesh.triangles.points_to_barycentric(src.triangles[tri_id], closest)
     corners = used[src_tris[tri_id]]                                # (n, 3) template vertex ids
     gt = {}

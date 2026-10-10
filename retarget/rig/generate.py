@@ -20,6 +20,7 @@ from ..formats.gltf_reader import GLB
 from ..formats.gltf_writer import write_glb
 from ..mesh import CanonicalBone, CanonicalImage, CanonicalMaterial, CanonicalMesh, CanonicalMorph
 from . import ict
+from .geometry import SurfaceQuery
 from .registration import apply_h, register, vertex_normals
 from .transfer import build_solver, correspond_triangles, deformation_gradients, frame_inverse
 
@@ -101,6 +102,32 @@ def weld(pos: np.ndarray, tris: np.ndarray, decimals: int = 6) -> trimesh.Trimes
     return m
 
 
+def face_components(groups, tris: np.ndarray, inverse: np.ndarray, lm_vertices: np.ndarray,
+                    min_share: float = 0.1) -> np.ndarray:
+    """Face indices of the connected components that hold the landmarks.
+
+    groups: list of face-index arrays (connected components of the welded mesh);
+    lm_vertices: ORIGINAL vertex ids nearest to each valid landmark.  Returns the
+    faces of the component with most landmarks plus any component holding at
+    least `min_share` of them (a face split into upper/lower pieces).
+    """
+    if len(groups) <= 1:
+        return np.arange(len(tris))
+    wtris = inverse[tris]
+    comp_of_wvertex = np.full(int(inverse.max()) + 1, -1, np.int64)
+    for gi, g in enumerate(groups):
+        verts = np.unique(wtris[g])
+        unset = comp_of_wvertex[verts] < 0
+        comp_of_wvertex[verts[unset]] = gi
+    hit = comp_of_wvertex[inverse[lm_vertices]]
+    hit = hit[hit >= 0]
+    if len(hit) == 0:
+        return max(groups, key=len)
+    counts = np.bincount(hit, minlength=len(groups))
+    chosen = [gi for gi in range(len(groups)) if counts[gi] >= max(3, min_share * counts.sum())]
+    return np.concatenate([groups[gi] for gi in chosen])
+
+
 def rigid_shells(welded: trimesh.Trimesh, max_fraction: float = 0.2) -> np.ndarray:
     """Boolean mask over the ORIGINAL vertices lying on small watertight components
     (eyeballs, teeth) of the welded mesh."""
@@ -137,7 +164,7 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
     t0 = time.time()
     tmpl = ict.load()
     tmpl_lm, tmpl_valid, tmpl_lm_vertex = load_landmarks(template_name)
-    tgt_lm, tgt_valid, _ = load_landmarks(model)
+    tgt_lm, tgt_valid, tgt_nearest = load_landmarks(model)
 
     glb = GLB(MODELS / f'{model}.glb')
     mesh = glb_to_canonical(glb)
@@ -148,9 +175,12 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
     # which would otherwise cut the skin into dozens of "parts".
     welded = weld(tpos, ttris)
     groups = trimesh.graph.connected_components(welded.face_adjacency, nodes=np.arange(len(ttris)))
-    biggest = max(groups, key=len) if len(groups) > 1 else np.arange(len(ttris))
+    # The face is often its own mesh piece (MMD models split face / body / hair), so "largest
+    # component" is wrong; take the pieces the landmarks landed on instead.
+    biggest = face_components(groups, ttris, welded.metadata['inverse'], tgt_nearest[tgt_valid])
     skin = trimesh.Trimesh(tpos, ttris[biggest], process=False)
-    log(f'[{model}] target V={len(tpos)} F={len(ttris)}; fitting surface F={len(biggest)} of {len(groups)} parts')
+    log(f'[{model}] target V={len(tpos)} F={len(ttris)}; fitting surface F={len(biggest)} '
+        f'(landmark-selected) of {len(groups)} parts')
 
     # ---- registration (template subset = ICT fitting vertices)
     log('[register]')
@@ -172,10 +202,10 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
     wpos = np.asarray(welded.vertices, np.float64)
     wtris = np.asarray(welded.faces, np.int64)
     inverse = welded.metadata['inverse']
-    dmesh = trimesh.Trimesh(reg.deformed, sub_tris, process=False)
-    _, dist_all, tri_near = trimesh.proximity.ProximityQuery(dmesh).on_surface(wpos)
+    dquery = SurfaceQuery(reg.deformed, sub_tris)
+    _, dist_all, tri_near = dquery.closest(wpos)
     wnormals = vertex_normals(wpos, wtris)
-    agree = (wnormals * dmesh.face_normals[tri_near]).sum(1)      # +1: same facing as the template skin
+    agree = (wnormals * dquery.face_normals[tri_near]).sum(1)      # +1: same facing as the template skin
     rigid_v = rigid_shells(welded, max_fraction=0.2)
     rigid_w = np.zeros(len(wpos), bool)
     rigid_w[inverse[rigid_v]] = True
@@ -188,9 +218,11 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
     #   everything else inside the region (mouth socket, gums, tongue, eyelid insides) -> free
     skin_w = np.zeros(len(wpos), bool)
     skin_w[np.unique(wtris[biggest])] = True
-    near_v = (dist_all < anchor_dist) & ~rigid_w
     exterior = skin_w & (dist_all < face_dist) & (agree > 0.3) & ~rigid_w
     attachable = ~skin_w & (dist_all < face_dist) & (agree > 0.3) & ~rigid_w
+    # only the face pieces and the attachable shells enter the system; hair strands, clothes and
+    # other parts near the face stay out (they would add tens of thousands of unknowns)
+    near_v = ((dist_all < anchor_dist) & skin_w & ~rigid_w) | attachable
     ring = skin_w & near_v & (dist_all >= anchor_dist - ring_width)
     face_v = near_v & ~ring
     unknown_ids = np.where(near_v)[0]
@@ -250,7 +282,10 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
 
     out = MODELS / f'{model}.rigged.glb'
     write_glb(mesh, out)
+    import resource
+    peak_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
     report = {
+        'peak_rss_gb': round(peak_gb, 2),
         'model': model, 'template': template_name, 'seconds': round(time.time() - t0, 1),
         'registration': {'scale': float(np.cbrt(np.linalg.det(reg.similarity[:3, :3]))),
                          'residual_mm': reg.residual * 1000, 'landmark_error_mm': reg.landmark_error * 1000},
@@ -260,7 +295,7 @@ def generate(model: str, template_name: str = 'ict_neutral', face_dist: float = 
         'output': str(out),
     }
     (MODELS / f'{model}.rig.json').write_text(json.dumps(report, indent=1))
-    log(f'[done] {len(new_morphs)} blendshapes -> {out} in {report["seconds"]}s')
+    log(f'[done] {len(new_morphs)} blendshapes -> {out} in {report["seconds"]}s (peak RSS {peak_gb:.1f} GB)')
     return report
 
 

@@ -90,6 +90,67 @@ VRM_MORPH_DRIVERS: dict[str, dict] = {
     'surprised': {'inputs': ['eyeWideLeft', 'eyeWideRight', 'jawOpen'], 'combine': 'mean'},
 }
 
+# English / VRoid-style morph names seen on VRM and game-engine exports (lower-cased keys).
+# Side suffixes _l/_r / _left/_right are stripped before lookup and re-applied to the inputs.
+ENGLISH_MORPH_DRIVERS: dict[str, dict] = {
+    # mouth / vowels
+    'lip_a': {'inputs': ['jawOpen'], 'combine': 'max'}, 'mth_a': {'inputs': ['jawOpen'], 'combine': 'max'},
+    'lip_i': {'inputs': ['mouthStretchLeft', 'mouthStretchRight'], 'combine': 'mean'},
+    'mth_i': {'inputs': ['mouthStretchLeft', 'mouthStretchRight'], 'combine': 'mean'},
+    'lip_u': {'inputs': ['mouthPucker'], 'combine': 'max'}, 'mth_u': {'inputs': ['mouthPucker'], 'combine': 'max'},
+    'lip_e': {'inputs': ['mouthSmileLeft', 'mouthSmileRight', 'jawOpen'], 'combine': 'min'},
+    'mth_e': {'inputs': ['mouthSmileLeft', 'mouthSmileRight', 'jawOpen'], 'combine': 'min'},
+    'lip_o': {'inputs': ['mouthFunnel'], 'combine': 'max'}, 'mth_o': {'inputs': ['mouthFunnel'], 'combine': 'max'},
+    'lip_w': {'inputs': ['mouthPucker'], 'combine': 'max'},
+    'lip_up': {'inputs': ['mouthUpperUpLeft', 'mouthUpperUpRight'], 'combine': 'mean'},
+    'lip_down': {'inputs': ['mouthLowerDownLeft', 'mouthLowerDownRight'], 'combine': 'mean'},
+    'mouse_open': {'inputs': ['jawOpen'], 'combine': 'max'}, 'mouth_open': {'inputs': ['jawOpen'], 'combine': 'max'},
+    'mouth_wide': {'inputs': ['mouthStretchLeft', 'mouthStretchRight'], 'combine': 'mean'},
+    'mouth_short': {'inputs': ['mouthPucker'], 'combine': 'max', 'gain': 0.6},
+    'mouth_smile': {'inputs': ['mouthSmileLeft', 'mouthSmileRight'], 'combine': 'mean'},
+    'mth_fun': {'inputs': ['mouthSmileLeft', 'mouthSmileRight'], 'combine': 'mean'},
+    'mth_joy': {'inputs': ['mouthSmileLeft', 'mouthSmileRight', 'jawOpen'], 'combine': 'min'},
+    'mth_sorrow': {'inputs': ['mouthFrownLeft', 'mouthFrownRight'], 'combine': 'mean'},
+    'mth_angry': {'inputs': ['mouthFrownLeft', 'mouthFrownRight', 'mouthPressLeft', 'mouthPressRight'], 'combine': 'mean'},
+    'mth_surprised': {'inputs': ['jawOpen', 'mouthFunnel'], 'combine': 'min'},
+    'mth_up': {'inputs': ['mouthUpperUpLeft', 'mouthUpperUpRight'], 'combine': 'mean'},
+    'mth_down': {'inputs': ['mouthLowerDownLeft', 'mouthLowerDownRight'], 'combine': 'mean'},
+    # eyes
+    'blink': {'inputs': ['eyeBlinkLeft', 'eyeBlinkRight'], 'combine': 'min'},
+    'eye_close': {'inputs': ['eyeBlinkLeft', 'eyeBlinkRight'], 'combine': 'min'},
+    'eye_close_l': {'inputs': ['eyeBlinkLeft', 'eyeBlinkRight'], 'combine': 'diff'},
+    'eye_close_r': {'inputs': ['eyeBlinkRight', 'eyeBlinkLeft'], 'combine': 'diff'},
+    'blink_l': {'inputs': ['eyeBlinkLeft', 'eyeBlinkRight'], 'combine': 'diff'},
+    'blink_r': {'inputs': ['eyeBlinkRight', 'eyeBlinkLeft'], 'combine': 'diff'},
+    'wink_l': {'inputs': ['eyeBlinkLeft', 'eyeBlinkRight'], 'combine': 'diff'},
+    'wink_r': {'inputs': ['eyeBlinkRight', 'eyeBlinkLeft'], 'combine': 'diff'},
+    'eye_open': {'inputs': ['eyeWideLeft', 'eyeWideRight'], 'combine': 'mean'},
+    'eye_wide': {'inputs': ['eyeWideLeft', 'eyeWideRight'], 'combine': 'mean'},
+    'eye_surprised': {'inputs': ['eyeWideLeft', 'eyeWideRight'], 'combine': 'mean'},
+    'eye_small': {'inputs': ['eyeSquintLeft', 'eyeSquintRight'], 'combine': 'mean'},
+    'eye_zitome': {'inputs': ['eyeSquintLeft', 'eyeSquintRight'], 'combine': 'mean'},
+    'eye_smile': {'inputs': ['eyeSquintLeft', 'eyeSquintRight', 'mouthSmileLeft', 'mouthSmileRight'], 'combine': 'min'},
+    'eye_joy': {'inputs': ['eyeSquintLeft', 'eyeSquintRight', 'mouthSmileLeft', 'mouthSmileRight'], 'combine': 'min'},
+    'eye_angry': {'inputs': ['browDownLeft', 'browDownRight', 'eyeSquintLeft', 'eyeSquintRight'], 'combine': 'min'},
+    # brows
+    'eye_brow_up': {'inputs': ['browInnerUp', 'browOuterUpLeft', 'browOuterUpRight'], 'combine': 'mean'},
+    'eye_brow_up_l': {'inputs': ['browOuterUpLeft', 'browInnerUp'], 'combine': 'mean'},
+    'eye_brow_up_r': {'inputs': ['browOuterUpRight', 'browInnerUp'], 'combine': 'mean'},
+    'eye_brow_down': {'inputs': ['browDownLeft', 'browDownRight'], 'combine': 'mean'},
+    'eye_brow_down_l': {'inputs': ['browDownLeft'], 'combine': 'max'},
+    'eye_brow_down_r': {'inputs': ['browDownRight'], 'combine': 'max'},
+    'brow_up': {'inputs': ['browInnerUp', 'browOuterUpLeft', 'browOuterUpRight'], 'combine': 'mean'},
+    'brow_down': {'inputs': ['browDownLeft', 'browDownRight'], 'combine': 'mean'},
+    'brw_angry': {'inputs': ['browDownLeft', 'browDownRight'], 'combine': 'mean'},
+    'brw_fun': {'inputs': ['browOuterUpLeft', 'browOuterUpRight'], 'combine': 'mean'},
+    'brw_joy': {'inputs': ['browInnerUp', 'browOuterUpLeft', 'browOuterUpRight'], 'combine': 'mean'},
+    'brw_sorrow': {'inputs': ['browInnerUp'], 'combine': 'max'},
+    'brw_surprised': {'inputs': ['browInnerUp', 'browOuterUpLeft', 'browOuterUpRight'], 'combine': 'mean'},
+    # cheeks
+    'cheek_pop': {'inputs': ['cheekPuff'], 'combine': 'max'},
+    'cheek_puff': {'inputs': ['cheekPuff'], 'combine': 'max'},
+}
+
 _KATAKANA_VARIANTS = {
     'ウインク': 'ウィンク',
     'ｳｨﾝｸ': 'ウィンク',
@@ -107,12 +168,28 @@ def normalize_morph_name(name: str) -> str:
     return n
 
 
+def _english_driver(name: str) -> dict | None:
+    """ENGLISH_MORPH_DRIVERS lookup with VRoid prefixes (Fcl_) stripped and lower-casing."""
+    key = name.lower()
+    if key.startswith('fcl_'):
+        key = key[4:]
+    if key in ENGLISH_MORPH_DRIVERS:
+        return dict(ENGLISH_MORPH_DRIVERS[key])
+    key2 = key.replace('_left', '_l').replace('_right', '_r')
+    if key2 in ENGLISH_MORPH_DRIVERS:
+        return dict(ENGLISH_MORPH_DRIVERS[key2])
+    return None
+
+
 def lookup_morph_driver(name: str) -> dict | None:
     n = normalize_morph_name(name)
     if n in MMD_MORPH_DRIVERS:
         return dict(MMD_MORPH_DRIVERS[n])
     if n in VRM_MORPH_DRIVERS:
         return dict(VRM_MORPH_DRIVERS[n])
+    eng = _english_driver(n)
+    if eng:
+        return eng
     # ARKit-native models: the morph *is* the input.  Accept common suffix styles.
     base = n.replace('_L', 'Left').replace('_R', 'Right')
     from .canonical import ARKIT_52

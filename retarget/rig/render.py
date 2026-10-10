@@ -13,11 +13,42 @@ from pathlib import Path
 import numpy as np
 
 
+def ensure_server(server: str = 'http://127.0.0.1:6790', wait: float = 15.0) -> bool:
+    """Start `python -m retarget.server` detached if nothing answers at `server`."""
+    import subprocess
+    import sys
+    import urllib.request
+    from urllib.parse import urlparse
+
+    def alive() -> bool:
+        try:
+            urllib.request.urlopen(f'{server}/api/models', timeout=2).read()
+            return True
+        except Exception:
+            return False
+
+    if alive():
+        return True
+    port = urlparse(server).port or 6790
+    subprocess.Popen([sys.executable, '-u', '-m', 'retarget.server', '--port', str(port)],
+                     cwd=str(Path(__file__).resolve().parents[2]), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    t0 = time.time()
+    while time.time() - t0 < wait:
+        if alive():
+            print(f'[render] started retarget.server on port {port}')
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def render_front(model: str, out_png: Path, size: int = 1024, server: str = 'http://127.0.0.1:6790',
                  lit: bool = True, background: str = 'gray', timeout: float = 90.0) -> dict:
     from playwright.sync_api import sync_playwright
     out_png = Path(out_png)
     out_png.parent.mkdir(parents=True, exist_ok=True)
+    if not ensure_server(server):
+        raise RuntimeError(f'no server at {server} and could not start one')
     with sync_playwright() as p:
         browser = p.chromium.launch(args=['--use-angle=swiftshader', '--enable-unsafe-swiftshader',
                                           '--ignore-gpu-blocklist', '--enable-webgl'])

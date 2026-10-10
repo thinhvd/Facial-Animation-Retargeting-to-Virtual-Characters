@@ -33,10 +33,15 @@ VRM0_PRESETS = {
 def inspect_glb(path: Path) -> dict:
     doc = read_glb_json(path)
     morphs: list[str] = []
+    generated: list[str] = []
     for mesh in doc.get('meshes', []):
-        for name in mesh.get('extras', {}).get('targetNames', []):
+        names = mesh.get('extras', {}).get('targetNames', [])
+        metas = mesh.get('extras', {}).get('targetMeta', [{}] * len(names))
+        for name, meta in zip(names, metas):
             if name not in morphs:
                 morphs.append(name)
+            if isinstance(meta, dict) and meta.get('generated'):
+                generated.append(name)
     nodes = [n.get('name', '') for n in doc.get('nodes', [])]
     ext = doc.get('extensions', {})
     vrm_version = None
@@ -57,7 +62,7 @@ def inspect_glb(path: Path) -> dict:
         for b in ext['VRM'].get('humanoid', {}).get('humanBones', []):
             if 'bone' in b and 'node' in b and b['node'] < len(nodes):
                 vrm_bones[b['bone']] = nodes[b['node']]
-    return {'morphs': morphs, 'nodes': nodes, 'vrm_version': vrm_version,
+    return {'morphs': morphs, 'generated': generated, 'nodes': nodes, 'vrm_version': vrm_version,
             'vrm_expressions': vrm_expressions, 'vrm_bones': vrm_bones,
             'generator': doc.get('asset', {}).get('generator'),
             'source': doc.get('asset', {}).get('extras', {})}
@@ -108,7 +113,10 @@ def verify_laterality(path: Path, entries: list[dict], min_ratio: float = 0.25) 
     return wrong
 
 
-def build_adapter(path: Path) -> dict:
+VRM_EMOTIONS = ('happy', 'angry', 'sad', 'relaxed', 'surprised')
+
+
+def build_adapter(path: Path, emotions: bool = False) -> dict:
     info = inspect_glb(path)
     entries: list[dict] = []
     consumers: dict[str, list[str]] = defaultdict(list)
@@ -119,11 +127,15 @@ def build_adapter(path: Path) -> dict:
         name = info['vrm_bones'].get(sem) or resolve_bone(sem, info['nodes'])
         bones[sem] = name
 
-    # ---- VRM expressions take precedence over raw morph targets (they bundle several)
+    # ---- VRM expressions take precedence over raw morph targets (they bundle several).
+    # Emotion presets (happy, angry, ...) change eyes + mouth + brows at once, so they are
+    # not driven from single-region inputs unless explicitly enabled.
     if info['vrm_expressions']:
         for preset in info['vrm_expressions']:
             drv = VRM_MORPH_DRIVERS.get(preset)
             if not drv:
+                continue
+            if preset in VRM_EMOTIONS and not emotions:
                 continue
             if preset.startswith('look') and bones['leftEye'] and bones['rightEye']:
                 continue  # bones give continuous gaze; skip the discrete look* expressions
@@ -131,16 +143,33 @@ def build_adapter(path: Path) -> dict:
             for i in drv['inputs']:
                 consumers[i].append(f'vrm:{preset}')
 
-    # ---- raw morph targets
-    for name in info['morphs']:
+    # ---- raw morph targets: artist-made first, generated ones only for inputs nobody covers yet
+    generated = set(info['generated'])
+    artist = [n for n in info['morphs'] if n not in generated]
+    for name in artist:
         drv = lookup_morph_driver(name)
         if not drv:
             continue
         if any(e['target'] == name for e in entries):
             continue
+        # on a VRM the presets already bundle the raw morphs: only fill inputs the presets miss
+        if info['vrm_expressions'] and all(consumers.get(i) for i in drv['inputs']):
+            continue
         entries.append({'kind': 'morph', 'target': name, **drv})
         for i in drv['inputs']:
             consumers[i].append(f'morph:{name}')
+    for name in info['morphs']:
+        if name not in generated:
+            continue
+        drv = lookup_morph_driver(name)
+        if not drv:
+            continue
+        covered_by_bone = all(i in GAZE_SHAPES for i in drv['inputs']) and bones['leftEye'] and bones['rightEye']
+        if covered_by_bone or all(consumers.get(i) for i in drv['inputs']):
+            continue
+        entries.append({'kind': 'morph', 'target': name, 'generated': True, **drv})
+        for i in drv['inputs']:
+            consumers[i].append(f'generated:{name}')
 
     # ---- verify left/right of lateral morphs against the geometry.
     # Name tables assume the character's own left/right, but some models name winks
@@ -153,8 +182,9 @@ def build_adapter(path: Path) -> dict:
     if fixes:
         consumers = defaultdict(list)
         for e in entries:
+            kind = 'vrm' if e['kind'] == 'vrmExpression' else ('generated' if e.get('generated') else 'morph')
             for i in e['inputs']:
-                consumers[i].append(f"{'vrm' if e['kind'] == 'vrmExpression' else 'morph'}:{e['target']}")
+                consumers[i].append(f"{kind}:{e['target']}")
 
     # ---- coverage
     coverage: dict[str, str | None] = {}
@@ -168,6 +198,9 @@ def build_adapter(path: Path) -> dict:
     by_region = {r: {'covered': sum(1 for n in names if coverage[n]), 'total': len(names)}
                  for r, names in REGIONS.items()}
     covered = sum(1 for n in ARKIT_52 if coverage[n])
+    by_source = defaultdict(int)
+    for c in coverage.values():
+        by_source[c.split(':')[0] if c else 'none'] += 1
 
     return {
         'version': 1,
@@ -178,9 +211,13 @@ def build_adapter(path: Path) -> dict:
         'gazeMode': 'bone' if (bones['leftEye'] and bones['rightEye']) else 'morph',
         'bones': bones,
         'entries': entries,
-        'unmappedMorphs': [m for m in info['morphs'] if not any(e['target'] == m for e in entries)],
+        'unmappedMorphs': [m for m in info['morphs']
+                           if m not in generated and not any(e['target'] == m for e in entries)],
+        'unusedGenerated': [m for m in info['morphs']
+                            if m in generated and not any(e['target'] == m for e in entries)],
         'coverage': coverage,
-        'coverageSummary': {'covered': covered, 'total': len(ARKIT_52), 'byRegion': by_region},
+        'coverageSummary': {'covered': covered, 'total': len(ARKIT_52), 'byRegion': by_region,
+                            'bySource': dict(by_source)},
     }
 
 
@@ -188,16 +225,18 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('glb', type=Path, nargs='+')
     ap.add_argument('--quiet', action='store_true')
+    ap.add_argument('--emotions', action='store_true', help='also drive VRM emotion presets (happy, angry, ...)')
     args = ap.parse_args(argv)
     for glb in args.glb:
-        adapter = build_adapter(glb)
+        adapter = build_adapter(glb, emotions=args.emotions)
         out = glb.with_suffix('.adapter.json')
         out.write_text(json.dumps(adapter, ensure_ascii=False, indent=1), encoding='utf-8')
         s = adapter['coverageSummary']
         bones = {k: v for k, v in adapter['bones'].items() if v}
         regions = ', '.join(f'{r} {v["covered"]}/{v["total"]}' for r, v in s['byRegion'].items())
+        sources = ', '.join(f'{k} {v}' for k, v in s['bySource'].items())
         print(f'{glb.name}: bones={bones} head={adapter["headMode"]} gaze={adapter["gazeMode"]} '
-              f'entries={len(adapter["entries"])} coverage={s["covered"]}/{s["total"]} ({regions})')
+              f'entries={len(adapter["entries"])} coverage={s["covered"]}/{s["total"]} ({regions}) [{sources}]')
         fixed = [e['target'] for e in adapter['entries'] if e.get('lateralityFixed')]
         if fixed:
             print(f'  laterality corrected from geometry: {", ".join(fixed)}')

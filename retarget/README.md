@@ -141,6 +141,40 @@ move up to 30 mm in jawOpen and are left free); on the face skin alone the numbe
 runs. Oracle check (identity correspondence on the template itself): 0.04 mm, so the solver is exact
 and the remaining error is registration + correspondence. Results are in `data/eval/*.json`.
 
+## P2: one-command import and the hybrid adapter
+
+```bash
+python -m retarget.importer NodeServer/models/model2/model2.pmx                 # MMD: morphs + generated gaps
+python -m retarget.importer path/to/avatar.vrm                                   # VRM: presets + custom morphs
+python -m retarget.importer scan.obj --rig                                       # no rig at all: everything generated
+```
+
+`importer` = convert → adapter → (if brow+mouth coverage < 60 % and not a VRM) landmarks → generate →
+adapter again. The adapter ranks sources per canonical input:
+
+1. VRM expression presets (`aa`, `blink`, `lookUp`, …; emotion presets `happy/angry/sad/relaxed/surprised`
+   are off by default because they move eyes + mouth + brows at once — `--emotions` enables them)
+2. artist morphs by name: MMD Japanese table, VRM presets, English/VRoid table (`lip_a`, `blink_L`,
+   `eye_brow_up_L`, `Fcl_MTH_A`, …), ARKit-named targets
+3. bones for head and gaze
+4. generated blendshapes (`targetMeta.generated`) — only for inputs nothing above covers
+5. rigid fallback (whole model rotates when there is no head bone)
+
+| Model | Before | After (hybrid) | Sources |
+| --- | --- | --- | --- |
+| HeadA.pmx | 34/52 | 52/52 | 26 artist morphs, 8 bone, 18 generated |
+| Seed-san.vrm (VRM 1.0 sample) | 24/52 (presets only) | 31/52 | 17 presets, 14 custom morphs |
+| MaleModel.pmx | 0/52 | 51/52 | 51 generated |
+| model2.pmx (MMD, face is a separate mesh piece) | 24/52 | 51/52 | 16 artist morphs, 8 bone, 27 generated |
+| testFemale1.pmx (`--up=-z --front=-y --scale 10`) | 0/52 | 51/52 | 51 generated, one command |
+
+VRM files are not rigged: the writer would drop the VRM extensions (MToon, spring bones). Their
+custom morphs cover most of what the presets miss.
+
+Resource note: generate (~1 min, a few GB for large meshes) and each headless-Chromium render
+(~1–2 GB) should run one at a time on a 16 GB machine; running several in parallel has crashed
+VS Code. Start long jobs detached (`setsid nohup python -u -m ... > log 2>&1 &`).
+
 ## Current coverage (P0)
 
 | Model | Morphs | Head | Gaze | Coverage |
