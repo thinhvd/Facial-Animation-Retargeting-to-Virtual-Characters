@@ -33,6 +33,16 @@ def convert(src: Path, dst: Path, scale: float | None = None, textures: bool = T
         shutil.copyfile(src, dst)
         print(f'{src.name}: copied through -> {dst}')
         return dst
+    if ext == '.obj':
+        from .formats import obj_convert
+        mesh = obj_convert.to_canonical(src, scale or 1.0, up if up != '+y' else '+y',
+                                        front if front != '-z' else '+z')
+        gltf_writer.write_glb(mesh, dst)
+        lo, hi = mesh.bounds()
+        print(f'{src.name}: V={mesh.vertex_count} F={len(mesh.triangles)} (obj, lit, no rig)')
+        print(f'  bounds (m): min={lo.round(3).tolist()} max={hi.round(3).tolist()}')
+        print(f'  -> {dst} ({dst.stat().st_size / 1e6:.1f} MB)')
+        return dst
     raise SystemExit(f'{src}: format {ext!r} not supported by the pure-Python path; '
                      f'use Blender (tools/blender_export.py) to produce a .glb first')
 

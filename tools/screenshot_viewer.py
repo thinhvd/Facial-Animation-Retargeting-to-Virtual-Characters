@@ -31,6 +31,7 @@ def main(argv=None):
     ap.add_argument('--tag', default=None, help='suffix for the posed screenshot file name')
     ap.add_argument('--live', action='store_true',
                     help='do not drive from sliders; wait and shoot whatever the socket delivers')
+    ap.add_argument('--lit', action='store_true', help='replace unlit materials with shaded ones')
     args = ap.parse_args(argv)
     args.out.mkdir(parents=True, exist_ok=True)
     w, h = (int(v) for v in args.size.split('x'))
@@ -42,7 +43,7 @@ def main(argv=None):
         console: list[str] = []
         page.on('console', lambda m: console.append(f'[{m.type}] {m.text}'))
         page.on('pageerror', lambda e: console.append(f'[pageerror] {e}'))
-        page.goto(f'{args.url}?model={args.model}&panel=0&stats=0')
+        page.goto(f'{args.url}?model={args.model}&panel=0&stats=0&lit={1 if args.lit else 0}')
 
         t0 = time.time()
         status = ''

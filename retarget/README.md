@@ -91,6 +91,56 @@ python tools/screenshot_viewer.py HeadA --live      # shoot whatever the socket 
 
 Renders `web/viewer.html` in headless Chromium (SwiftShader) and writes a neutral and a posed PNG.
 
+## P1: generating blendshapes for a model without morphs
+
+```
+retarget/rig/ict.py          ICT-FaceKit template (data/ict-facekit, MIT): neutral + 53 expressions + regions
+retarget/rig/render.py       front render through the viewer (headless Chromium) + camera description
+retarget/rig/landmarks.py    render -> MediaPipe 478 landmarks -> ray cast -> 3D points on the mesh
+retarget/rig/registration.py similarity (Umeyama) + non-rigid ICP (Amberg 2007), sparse least squares
+retarget/rig/transfer.py     deformation transfer (Sumner & Popović 2004): gradients, smoothness, anchors, attach
+retarget/rig/generate.py     the pipeline: register -> classify vertices -> correspond -> solve 53 shapes -> .rigged.glb
+retarget/rig/evaluate.py     gate test on held-out ICT identities (optionally remeshed)
+```
+
+```bash
+git clone --depth 1 https://github.com/USC-ICT/ICT-FaceKit data/ict-facekit
+python -m retarget.convert data/ict-facekit/FaceXModel/generic_neutral_mesh.obj -o web/models/ict_neutral.glb --scale 0.01
+python -m retarget.rig.landmarks ict_neutral MaleModel        # server must be running
+python -m retarget.rig.generate MaleModel                      # -> web/models/MaleModel.rigged.glb (~1 min)
+python -m retarget.adapter web/models/MaleModel.rigged.glb     # coverage 51/52 (no tongueOut in ICT)
+python -m retarget.rig.evaluate --identity 7 --remesh 0.5      # held-out identity, different topology
+```
+
+How `generate` treats the target (all on a position-welded copy of the mesh):
+
+| Class | Rule | Constraint |
+| --- | --- | --- |
+| exterior | largest connected component, < 1.2 cm from the registered template, normals agree | gradient = template gradient |
+| attachable | other pieces that satisfy the same test (eyebrows, lashes) | keep rest offset to nearest exterior vertex |
+| ring | skin in the outer 1 cm of the 4 cm region | anchored at rest |
+| free | everything else inside (mouth socket, gums, tongue, eyelid insides) | smoothness only |
+| rigid shells | small watertight components (eyeballs, teeth) | excluded |
+
+Things that went wrong on the way and are now handled: duplicate vertices along UV seams tore the
+mesh (weld first); interior shells matched to face triangles and anchored deep in the mouth pulled the
+lips together (classify by component + normal); floating eyebrow shells had no anchor and flew away
+(attach + Tikhonov regularisation); sliver triangles blew up the gradients (area threshold).
+
+Gate results (identity held out, blendshapes hidden, error over face vertices the truth moves):
+
+| Target | Topology | Mean error | p95 | Worst |
+| --- | --- | --- | --- | --- |
+| identity 7 | same as template (26,719 v, with interior shells) | 0.70 mm (0.8 % IOD) | 0.93 mm | mouthRollUpper 3.5 mm |
+| identity 7, remesh 50 % | different (5,648 v) | 0.34 mm (0.4 % IOD) | 0.85 mm | mouthClose 1.8 mm |
+| identity 23, remesh 30 % | different (3,399 v) | 0.35 mm (0.4 % IOD) | 0.86 mm | mouthClose 1.5 mm |
+| identity 42, coeff 1.5 | same as template | 0.75 mm (0.8 % IOD) | 1.00 mm | mouthRollUpper 3.8 mm |
+
+The same-topology targets score worse only because they carry ICT's interior shells (gums, tongue
+move up to 30 mm in jawOpen and are left free); on the face skin alone the numbers match the remeshed
+runs. Oracle check (identity correspondence on the template itself): 0.04 mm, so the solver is exact
+and the remaining error is registration + correspondence. Results are in `data/eval/*.json`.
+
 ## Current coverage (P0)
 
 | Model | Morphs | Head | Gaze | Coverage |

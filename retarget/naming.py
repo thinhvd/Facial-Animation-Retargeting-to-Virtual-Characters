@@ -121,6 +121,10 @@ def lookup_morph_driver(name: str) -> dict | None:
     lowered = {a.lower(): a for a in ARKIT_52}
     if base.lower() in lowered:
         return {'inputs': [lowered[base.lower()]], 'combine': 'max'}
+    # sided variants of ARKit shapes that are single in ARKit (ICT: browInnerUp_L/_R, cheekPuff_L/_R)
+    for suffix in ('Left', 'Right'):
+        if base.endswith(suffix) and base[:-len(suffix)] in ARKIT_52:
+            return {'inputs': [base[:-len(suffix)]], 'combine': 'max'}
     return None
 
 

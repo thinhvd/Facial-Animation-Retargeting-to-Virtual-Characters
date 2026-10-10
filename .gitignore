@@ -12,3 +12,9 @@ web/models/*.vrm
 web/models/*.adapter.json
 weights/face_landmarker.task
 package-lock.json
+
+# external datasets (ICT-FaceKit clone etc.)
+data/
+web/models/*.png
+web/models/*.json
+web/models/*.npz
