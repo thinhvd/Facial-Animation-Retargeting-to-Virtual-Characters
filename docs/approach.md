@@ -2,7 +2,7 @@
 
 Người dùng nhìn vào webcam, một mô hình nhân vật 3D bất kỳ trên màn hình lặp lại biểu cảm khuôn mặt của họ theo real-time, mà không cần artist chỉnh tay cho từng mô hình.
 
-Tài liệu này giải thích bài toán, ý tưởng, cách phiên bản mới được xây dựng, kết quả đạt được và những phần còn để ngỏ. Cách cài đặt và chạy nằm trong [README](../README.md), cách dùng giao diện nằm trong [web-ui.md](web-ui.md).
+Tài liệu này giải thích bài toán, ý tưởng, cách phiên bản mới được xây dựng và kết quả đạt được. Cách cài đặt và chạy nằm trong [README](../README.md), cách dùng giao diện nằm trong [web-ui.md](web-ui.md).
 
 ## 1. Bài toán
 
@@ -136,17 +136,6 @@ Làm thêm ngoài proposal:
 - Ba sửa lỗi trong bước khớp khuôn mặt mẫu, làm sai số giảm từ 0,34 đến 0,75 mm xuống còn 0,23 đến 0,65 mm.
 - Tóc giữ cứng: trước đó tóc mái bị kéo theo lông mày, nhiều hơn cả chính lông mày.
 - One Euro filter và giữ webcam ở 30 fps.
-
-## 8. Những phần còn để ngỏ
-
-Đây là các hướng các em có thể phát triển tiếp:
-
-- **Hiệu chỉnh biên độ theo người dùng (ROM calibration).** Mỗi người nhắm mắt, há miệng ở mức khác nhau. Ví dụ với một người đeo kính, MediaPipe chỉ cho eyeBlink tối đa khoảng 0,5 nên nhân vật chỉ nhắm được một nửa mắt. Cần ghi vài giây biểu cảm tối đa của người dùng rồi chuẩn hoá về [0, 1].
-- **Blendshape vùng mắt cho mặt anime.** Mắt anime là mảnh texture lớn, trong khi khuôn mặt mẫu chỉ dịch mí mắt người vài mm, nên các biểu cảm như nheo mắt hay mở to gần như không thấy.
-- **Mô hình không có bone mắt** thì nhãn cầu không xoay khi liếc. Có thể tạo bone mắt tại tâm nhãn cầu (bước sinh blendshape đã nhận ra nhãn cầu).
-- **Định dạng chưa hỗ trợ:** `.pmd` (MMD đời cũ) cần add-on MMD Tools cho Blender. VRM chưa được sinh thêm blendshape vì khi ghi lại sẽ mất các phần riêng của VRM.
-- **Đánh giá đầy đủ (P4):** đo hệ thống cũ làm baseline, so với một baseline đơn giản (biến dạng trực tiếp theo điểm mốc), đo độ trễ từ webcam đến màn hình, user study ít nhất 30 người.
-- **Web UI:** chưa có chức năng tải mô hình lên; mới chạy thử trên Linux.
 
 ## Thuật ngữ
 

@@ -156,6 +156,6 @@ service/, vtuber_link_start.py, requirements.txt   Project cũ: face tracking b�
 
 ## Tài liệu thêm
 
-- [docs/approach.md](docs/approach.md): bài toán, ý tưởng, cách triển khai, kết quả, phần còn để ngỏ.
+- [docs/approach.md](docs/approach.md): bài toán, ý tưởng, cách triển khai, kết quả.
 - [docs/web-ui.md](docs/web-ui.md): hướng dẫn sử dụng Web UI.
 - [retarget/README.md](retarget/README.md): ghi chú kỹ thuật cho người sửa code, gồm định dạng adapter, các lỗi đã gặp và số liệu đánh giá.
