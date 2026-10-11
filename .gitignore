@@ -1,5 +1,8 @@
 node_modules/
-docs/
+# docs/ holds the private proposal files; only the student-facing guides are tracked
+docs/*
+!docs/approach.md
+!docs/web-ui.md
 .vscode/
 *.pyc
 *.so

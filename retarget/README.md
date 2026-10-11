@@ -29,6 +29,7 @@ tools/blender_export.py  runs inside Blender: import a scene file, export .glb w
 
 ```bash
 conda env create -f environment.yml && conda activate fr
+playwright install chromium      # headless renders for landmarks, screenshots
 curl -L -o weights/face_landmarker.task \
   https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
 npm i -g gltf-validator          # optional, for tools/validate_glb.js

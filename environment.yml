@@ -1,14 +1,16 @@
-# Environment for the canonical pipeline (retarget/).  The legacy B0 pipeline
+# Environment for the new pipeline (retarget/, web/).  The old pipeline on branch master
 # (vtuber_link_start.py + NodeServer) keeps its own requirements.txt.
 #
 #   conda env create -f environment.yml
 #   conda activate fr
+#   playwright install chromium     # headless browser: front renders for landmarks, screenshots
 name: fr
 channels:
   - conda-forge
+  - nodefaults        # conda-forge only: no Anaconda terms-of-service prompt on fresh installs
 dependencies:
   - python=3.11
-  - nodejs            # only for tools/validate_glb.js (npm i -g gltf-validator)
+  - nodejs            # optional: tools/validate_glb.js (npm i -g gltf-validator)
   - pip
   - pip:
       - mediapipe>=0.10.18
@@ -16,7 +18,9 @@ dependencies:
       - numpy
       - scipy
       - trimesh
+      - rtree             # ray casting for landmarks (trimesh)
       - pillow
       - python-socketio[client,asyncio_client]>=5.10
       - aiohttp>=3.9
-      - playwright       # optional: tools/screenshot_viewer.py
+      - playwright        # headless Chromium: landmark renders, tools/screenshot_viewer.py
+      - fast_simplification   # only retarget.rig.evaluate --remesh
